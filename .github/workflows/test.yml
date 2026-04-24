@@ -14,6 +14,7 @@ env:
   PYTHON_VERSION: "3.11"
   GCP_PROJECT_ID: "test-project-ci"
   VALID_TOKENS: '{"ci_test_token_001":"CI Test Corp"}'
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   lint:

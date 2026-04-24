@@ -56,7 +56,10 @@ jobs:
             --image=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.SERVICE_NAME }}:${{ steps.version.outputs.VERSION }} \
             --region=${{ env.REGION }} \
             --platform=managed \
-            --allow-unauthenticated
+            --allow-unauthenticated \
+            --service-account=excelforge-runtime@${{ env.PROJECT_ID }}.iam.gserviceaccount.com \
+            --set-env-vars=GCP_PROJECT_ID=${{ env.PROJECT_ID }} \
+            --set-secrets=SENTRY_DSN=SENTRY_DSN:latest,VALID_TOKENS=VALID_TOKENS:latest
 
       - name: Verify deployment
         run: |

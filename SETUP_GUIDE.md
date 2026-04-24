@@ -65,18 +65,18 @@ Cloud Consoleのメニューから `[セキュリティ] > [Secret Manager]` に
    - `Secret Manager のシークレット アクセサー` (roles/secretmanager.secretAccessor)
    - `Cloud Run 起動元` (roles/run.invoker)
 
-### 2-5. GitHub Actions用デプロイ権限の設定 (Workload Identity Federation)
-セキュリティ上、GitHubにサービスアカウントキー（JSON）を持たせないための推奨設定です。
+### 2-5. GitHub Actions用デプロイ権限の設定 (サービスアカウントキー)
+GitHub ActionsからGCPへデプロイするための認証情報を発行します。
 
-1. [Googleの公式手順 (Auth Action)](https://github.com/google-github-actions/auth) に従い、Workload Identity Pool と Provider を作成します。
-2. プロバイダに対して、指定のGitHubリポジトリ（`alnozsep/ExcelForge`）からのアクセスのみを許可するように設定します。
-3. デプロイ用の別のサービスアカウント（例: `github-deployer`）を作成し、以下のロールを付与します：
+1. `[IAMと管理] > [サービス アカウント]` に移動し、`[サービスアカウントを作成]` をクリックします。
+2. 名前: `github-deployer`
+3. 以下のロールを付与します：
    - `Cloud Run 管理者` (roles/run.admin)
    - `サービスアカウント ユーザー` (roles/iam.serviceAccountUser)
    - `Artifact Registry 管理者` (roles/artifactregistry.admin)
-4. 控えておく値:
-   - **WIF_PROVIDER**: (例: `projects/123456789/locations/global/workloadIdentityPools/my-pool/providers/my-provider`)
-   - **WIF_SERVICE_ACCOUNT**: (例: `github-deployer@YOUR_PROJECT_ID.iam.gserviceaccount.com`)
+4. 作成したサービスアカウントの行をクリックし、「キー」タブを開きます。
+5. 「鍵を追加」>「新しい鍵を作成」をクリックし、**JSON**形式で作成・ダウンロードします。
+6. ダウンロードされたJSONファイルの中身（テキスト全体）を後でGitHubに登録するため、控えておきます。
 
 ---
 
@@ -87,10 +87,9 @@ Cloud Consoleのメニューから `[セキュリティ] > [Secret Manager]` に
 ### 3-1. GitHub Secretsの登録
 1. GitHubリポジトリ `alnozsep/ExcelForge` にアクセスします。
 2. `Settings > Secrets and variables > Actions` に移動します。
-3. `[New repository secret]` をクリックし、以下の3つを登録します。
+3. `[New repository secret]` をクリックし、以下の2つを登録します。
    - `GCP_PROJECT_ID`: 控えておいたGCPのプロジェクトID
-   - `WIF_PROVIDER`: 控えておいたWorkload Identity Providerの文字列
-   - `WIF_SERVICE_ACCOUNT`: デプロイ用サービスアカウントのメールアドレス
+   - `GCP_CREDENTIALS`: ダウンロードしたサービスアカウントキー（JSON）の中身すべてを貼り付けます
 
 ### 3-2. ブランチ保護ルールの設定
 1. リポジトリの `Settings > Branches` に移動します。
@@ -136,8 +135,8 @@ cp .env.example .env
 > **完了チェック**
 > - [ ] Sentryのプロジェクト作成とDSN取得が完了した
 > - [ ] GCPのプロジェクト作成、API有効化、Secret Managerの登録が完了した
-> - [ ] GCPで実行用・デプロイ用のサービスアカウントを作成し、適切な権限を付与した
-> - [ ] GitHubリポジトリに3つのSecretを登録した
+> - [ ] GCPで実行用・デプロイ用のサービスアカウントを作成し、JSONキーをダウンロードした
+> - [ ] GitHubリポジトリに2つのSecretを登録した
 > - [ ] GitHubの `main` ブランチ保護ルールを設定した
 >
 > 全てにチェックがつけば、ユーザー様側の作業は完了です！お疲れ様でした。

@@ -55,7 +55,8 @@ jobs:
           gcloud run deploy ${{ env.SERVICE_NAME }} \
             --image=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.SERVICE_NAME }}:${{ steps.version.outputs.VERSION }} \
             --region=${{ env.REGION }} \
-            --platform=managed
+            --platform=managed \
+            --allow-unauthenticated
 
       - name: Verify deployment
         run: |

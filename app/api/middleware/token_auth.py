@@ -5,7 +5,7 @@ app/api/middleware/token_auth.py
 データベースは使用しない。環境変数から読み込んだ辞書で検証する。
 """
 
-from fastapi import Header, HTTPException, Depends
+from fastapi import HTTPException
 from app.config import settings
 
 
@@ -26,8 +26,5 @@ def verify_token(token: str) -> str:
     例外: HTTPException(403)
     """
     if token not in settings.VALID_TOKENS:
-        raise HTTPException(
-            status_code=403,
-            detail="無効なアクセストークンです"
-        )
+        raise HTTPException(status_code=403, detail="無効なアクセストークンです")
     return settings.VALID_TOKENS[token]

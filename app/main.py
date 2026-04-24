@@ -12,15 +12,14 @@ from app.config import settings
 from app.models.enums import AppException, ErrorCode
 from app.models.schemas import TokenValidationRequest, TokenValidationResponse
 from app.api.router import api_router
-from app.api.middleware.token_auth import verify_token
 import sentry_sdk
 
 # ログ設定
 logging.basicConfig(
-    level=getattr(logging, settings.LOG_LEVEL),
-    format=settings.LOG_FORMAT
+    level=getattr(logging, settings.LOG_LEVEL), format=settings.LOG_FORMAT
 )
 logger = logging.getLogger("excelforge")
+
 
 def _scrub_sensitive_data(event, hint):
     """Sentryに送信する前に機密データを除去する"""
@@ -30,10 +29,11 @@ def _scrub_sensitive_data(event, hint):
             event["request"]["data"] = "[REDACTED]"
     return event
 
+
 if not settings.DEBUG and settings.SENTRY_DSN:
     sentry_sdk.init(
         dsn=settings.SENTRY_DSN,
-        traces_sample_rate=0.1,   # パフォーマンス監視は10%サンプリング
+        traces_sample_rate=0.1,  # パフォーマンス監視は10%サンプリング
         environment="production",
         # 個人情報を送信しない設定
         send_default_pii=False,
@@ -51,6 +51,7 @@ app.include_router(api_router)
 
 # === エラーハンドラ ===
 
+
 @app.exception_handler(AppException)
 async def app_exception_handler(request: Request, exc: AppException):
     return JSONResponse(
@@ -58,11 +59,9 @@ async def app_exception_handler(request: Request, exc: AppException):
         content={
             "detail": exc.message,
             "error_code": exc.error_code.value,
-            "retry_suggestion": exc.error_code in [
-                ErrorCode.EXTRACTION_FAILED,
-                ErrorCode.TIMEOUT
-            ]
-        }
+            "retry_suggestion": exc.error_code
+            in [ErrorCode.EXTRACTION_FAILED, ErrorCode.TIMEOUT],
+        },
     )
 
 
@@ -75,12 +74,13 @@ async def general_exception_handler(request: Request, exc: Exception):
         content={
             "detail": "内部サーバーエラーが発生しました",
             "error_code": ErrorCode.INTERNAL_ERROR.value,
-            "retry_suggestion": False
-        }
+            "retry_suggestion": False,
+        },
     )
 
 
 # === トークン検証エンドポイント（設計書 6.2） ===
+
 
 @app.post("/api/v1/validate-token", response_model=TokenValidationResponse)
 async def validate_token(request: TokenValidationRequest):
@@ -91,7 +91,6 @@ async def validate_token(request: TokenValidationRequest):
     """
     if request.token in settings.VALID_TOKENS:
         return TokenValidationResponse(
-            valid=True,
-            customer_name=settings.VALID_TOKENS[request.token]
+            valid=True, customer_name=settings.VALID_TOKENS[request.token]
         )
     return TokenValidationResponse(valid=False)

@@ -55,6 +55,7 @@ class ErrorResponse(BaseModel):
 
 class ExtractionResult(BaseModel):
     """Gemini APIからの抽出結果を格納する"""
+
     data: dict
     raw_response: str = Field(exclude=True)  # ログに出さない
     model_used: str
@@ -64,7 +65,7 @@ class ExtractionResult(BaseModel):
 
 class MappingConfig(BaseModel):
     """抽出項目とExcelセルの対応定義"""
+
     mappings: list[dict] = Field(
-        ...,
-        description="各要素は {key: str, sheet: str, cell: str} の形式"
+        ..., description="各要素は {key: str, sheet: str, cell: str} の形式"
     )

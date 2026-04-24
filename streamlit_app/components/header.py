@@ -6,6 +6,7 @@ streamlit_app/components/header.py
 
 import streamlit as st
 
+
 def render_header():
     st.markdown(
         """
@@ -14,5 +15,5 @@ def render_header():
             <span style="font-size: 0.875rem; color: #64748B;">AI自動転記ツール</span>
         </div>
         """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )

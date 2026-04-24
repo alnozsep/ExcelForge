@@ -11,26 +11,32 @@ class TestDetectFileType:
     """ファイルタイプ判定のテスト"""
 
     @pytest.mark.unit
-    @pytest.mark.parametrize("filename,expected", [
-        ("document.pdf", FileType.PDF),
-        ("data.csv", FileType.CSV),
-        ("sheet.xlsx", FileType.XLSX),
-        ("old_sheet.xls", FileType.XLS),
-        ("DOCUMENT.PDF", FileType.PDF),  # 大文字
-        ("my.data.file.csv", FileType.CSV),  # 複数ドット
-    ])
+    @pytest.mark.parametrize(
+        "filename,expected",
+        [
+            ("document.pdf", FileType.PDF),
+            ("data.csv", FileType.CSV),
+            ("sheet.xlsx", FileType.XLSX),
+            ("old_sheet.xls", FileType.XLS),
+            ("DOCUMENT.PDF", FileType.PDF),  # 大文字
+            ("my.data.file.csv", FileType.CSV),  # 複数ドット
+        ],
+    )
     def test_valid_extensions(self, filename: str, expected: FileType):
         """対応拡張子が正しくFileTypeに変換されること"""
         assert detect_file_type(filename) == expected
 
     @pytest.mark.unit
-    @pytest.mark.parametrize("filename", [
-        "document.docx",
-        "image.png",
-        "archive.zip",
-        "noextension",
-        "",
-    ])
+    @pytest.mark.parametrize(
+        "filename",
+        [
+            "document.docx",
+            "image.png",
+            "archive.zip",
+            "noextension",
+            "",
+        ],
+    )
     def test_invalid_extensions(self, filename: str):
         """非対応拡張子でValueErrorが発生すること"""
         with pytest.raises(ValueError):

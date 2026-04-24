@@ -22,5 +22,5 @@ async def health_check():
     return HealthResponse(
         status="healthy",
         version=settings.APP_VERSION,
-        timestamp=datetime.now(timezone.utc)
+        timestamp=datetime.now(timezone.utc),
     )

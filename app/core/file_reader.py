@@ -131,7 +131,7 @@ def read_file(file_bytes: bytes, file_type: FileType) -> str:
                     raise FileReadError(
                         f"CSVファイルの読み込みに失敗しました（エンコーディングエラー）: {type(e).__name__}"
                     )
-            
+
             if not text.strip():
                 raise FileReadError("CSVファイルが空です。")
 
@@ -152,16 +152,18 @@ def read_file(file_bytes: bytes, file_type: FileType) -> str:
                 # 有効なデータ範囲を取得
                 min_row, max_row = ws.min_row, ws.max_row
                 min_col, max_col = ws.min_column, ws.max_column
-                
+
                 # 範囲が広すぎる場合の制限（最大100行100列程度）
                 max_row = min(max_row, 100)
-                max_col = min(max_col, 26) # A-Z
+                max_col = min(max_col, 26)  # A-Z
 
                 # 結合セルの範囲を把握
                 merged_ranges = ws.merged_cells.ranges
 
                 text_parts.append(f"Sheet: {sheet_name}")
-                for row in ws.iter_rows(min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col):
+                for row in ws.iter_rows(
+                    min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col
+                ):
                     for cell in row:
                         # 結合セルかどうか判定
                         is_merged = False
@@ -169,14 +171,16 @@ def read_file(file_bytes: bytes, file_type: FileType) -> str:
                         for m_range in merged_ranges:
                             if cell.coordinate in m_range:
                                 is_merged = True
-                                master_coord = openpyxl.utils.get_column_letter(m_range.min_col) + str(m_range.min_row)
+                                master_coord = openpyxl.utils.get_column_letter(
+                                    m_range.min_col
+                                ) + str(m_range.min_row)
                                 break
-                        
+
                         if is_merged and cell.coordinate != master_coord:
                             val = f"(part of merged cell {master_coord})"
                         else:
                             val = cell.value if cell.value is not None else "(empty)"
-                        
+
                         text_parts.append(f"{cell.coordinate}: {val}")
 
             text = "\n".join(text_parts)
@@ -197,7 +201,7 @@ def read_file(file_bytes: bytes, file_type: FileType) -> str:
                 # XLSも100x26に制限
                 nrows = min(sheet.nrows, 100)
                 ncols = min(sheet.ncols, 26)
-                
+
                 for rowx in range(nrows):
                     for colx in range(ncols):
                         cell_value = sheet.cell_value(rowx, colx)

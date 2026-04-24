@@ -84,7 +84,7 @@ def write_to_template(
         for key, val in extracted_data.items():
             if val is None or not isinstance(key, str) or ":" not in key:
                 continue
-            
+
             parts = key.split(":")
             if len(parts) == 2:
                 sheet_name, cell_ref = parts

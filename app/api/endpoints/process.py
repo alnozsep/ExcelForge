@@ -116,7 +116,7 @@ async def process_files(
 
         # Step 10: AI抽出
         parsed_mapping = json.loads(mapping_config) if mapping_config else None
-        
+
         template_text = None
         if not parsed_mapping:
             # マッピング指定がない場合、テンプレートの構造をAIに読み取らせる（自動マッピング）

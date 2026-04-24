@@ -13,6 +13,7 @@ from app.models.enums import AppException, ErrorCode
 from app.models.schemas import TokenValidationRequest, TokenValidationResponse
 from app.api.router import api_router
 from app.api.middleware.token_auth import verify_token
+import sentry_sdk
 
 # ログ設定
 logging.basicConfig(
@@ -20,6 +21,27 @@ logging.basicConfig(
     format=settings.LOG_FORMAT
 )
 logger = logging.getLogger("excelforge")
+
+def _scrub_sensitive_data(event, hint):
+    """Sentryに送信する前に機密データを除去する"""
+    # リクエストデータを除去
+    if "request" in event:
+        if "data" in event["request"]:
+            event["request"]["data"] = "[REDACTED]"
+    return event
+
+if not settings.DEBUG and settings.SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=settings.SENTRY_DSN,
+        traces_sample_rate=0.1,   # パフォーマンス監視は10%サンプリング
+        environment="production",
+        # 個人情報を送信しない設定
+        send_default_pii=False,
+        # リクエストボディを送信しない
+        request_bodies="never",
+        # ファイルアップロードの内容を除外
+        before_send=_scrub_sensitive_data,
+    )
 
 app = FastAPI(title="ExcelForge API", version=settings.APP_VERSION)
 

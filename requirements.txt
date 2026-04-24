@@ -10,3 +10,4 @@ pydantic==2.10.4
 pydantic-settings==2.7.1
 google-cloud-aiplatform==1.78.0
 xlrd==2.0.1
+sentry-sdk==1.40.0

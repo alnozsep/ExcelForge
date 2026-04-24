@@ -37,9 +37,10 @@ class Settings(BaseSettings):
     # 形式: {"token文字列": "顧客名"}
     # 例: {"abc123xyz": "株式会社A", "def456uvw": "B事務所"}
 
-    # === ログ ===
+    # === ログ・監視 ===
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    SENTRY_DSN: Optional[str] = None
 
     # === タイムアウト ===
     GEMINI_TIMEOUT_SECONDS: int = 120

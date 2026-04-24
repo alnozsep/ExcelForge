@@ -1,0 +1,17 @@
+[project]
+name = "excelforge"
+version = "1.0.0"
+description = "AI自動転記SaaSツール"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "unit: 単体テスト",
+    "integration: 結合テスト",
+]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.11"

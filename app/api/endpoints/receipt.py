@@ -32,7 +32,6 @@ async def get_receipt(receipt_id: str):
     """
     if receipt_id not in _receipt_cache:
         raise HTTPException(
-            status_code=404,
-            detail="指定されたレシートが見つかりません。"
+            status_code=404, detail="指定されたレシートが見つかりません。"
         )
     return _receipt_cache[receipt_id]

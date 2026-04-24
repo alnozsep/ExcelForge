@@ -59,10 +59,10 @@ def mask_sensitive_data(text: str) -> MaskingResult:
 
     # 各パターンの定義
     patterns = {
-        "MYNUMBER": r'(?<!\d)\d{4}[\s-]?\d{4}[\s-]?\d{4}(?!\d)',
-        "PHONE": r'(?<!\d)0\d{1,4}[\s-]?\d{1,4}[\s-]?\d{3,4}(?!\d)',
-        "EMAIL": r'[\w\.\-]+@[\w\.\-]+',
-        "ACCOUNT": r'(?<!\d)\d{7}(?!\d)',
+        "MYNUMBER": r"(?<!\d)\d{4}[\s-]?\d{4}[\s-]?\d{4}(?!\d)",
+        "PHONE": r"(?<!\d)0\d{1,4}[\s-]?\d{1,4}[\s-]?\d{3,4}(?!\d)",
+        "EMAIL": r"[\w\.\-]+@[\w\.\-]+",
+        "ACCOUNT": r"(?<!\d)\d{7}(?!\d)",
     }
 
     masked_text = text
@@ -80,30 +80,18 @@ def mask_sensitive_data(text: str) -> MaskingResult:
 
     # MYNUMBER
     masked_text = re.sub(
-        patterns["MYNUMBER"],
-        lambda m: replacer(m, "MYNUMBER"),
-        masked_text
+        patterns["MYNUMBER"], lambda m: replacer(m, "MYNUMBER"), masked_text
     )
 
     # PHONE
-    masked_text = re.sub(
-        patterns["PHONE"],
-        lambda m: replacer(m, "PHONE"),
-        masked_text
-    )
+    masked_text = re.sub(patterns["PHONE"], lambda m: replacer(m, "PHONE"), masked_text)
 
     # EMAIL
-    masked_text = re.sub(
-        patterns["EMAIL"],
-        lambda m: replacer(m, "EMAIL"),
-        masked_text
-    )
+    masked_text = re.sub(patterns["EMAIL"], lambda m: replacer(m, "EMAIL"), masked_text)
 
     # ACCOUNT
     masked_text = re.sub(
-        patterns["ACCOUNT"],
-        lambda m: replacer(m, "ACCOUNT"),
-        masked_text
+        patterns["ACCOUNT"], lambda m: replacer(m, "ACCOUNT"), masked_text
     )
 
     return MaskingResult(masked_text=masked_text, mask_map=mask_map)

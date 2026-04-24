@@ -6,6 +6,7 @@ streamlit_app/components/footer.py
 
 import streamlit as st
 
+
 def render_footer():
     st.markdown(
         """
@@ -17,5 +18,5 @@ def render_footer():
             </span>
         </div>
         """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )

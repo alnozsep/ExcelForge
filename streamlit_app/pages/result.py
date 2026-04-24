@@ -11,6 +11,7 @@ from components.footer import render_footer
 
 st.set_page_config(page_title="処理結果 - ExcelForge", page_icon="✅")
 
+
 def reset_and_go_back():
     """セッション状態をクリアしてアップロード画面に戻る"""
     # 処理関連のデータを削除（制約: 処理完了後、session_stateから処理関連データを削除する）
@@ -18,8 +19,9 @@ def reset_and_go_back():
         del st.session_state["result_excel"]
     if "receipt_data" in st.session_state:
         del st.session_state["receipt_data"]
-    
+
     st.switch_page("pages/upload.py")
+
 
 def main():
     # 認証チェック
@@ -40,7 +42,7 @@ def main():
 
     receipt = st.session_state.get("receipt_data", {})
     processing_time = receipt.get("processing_time_seconds", 0)
-    
+
     if processing_time:
         st.write(f"**処理時間:** {processing_time:.2f} 秒")
 
@@ -48,7 +50,7 @@ def main():
 
     # ダウンロードセクション
     col1, col2 = st.columns(2)
-    
+
     with col1:
         st.download_button(
             label="📥 Excelをダウンロード",
@@ -56,9 +58,9 @@ def main():
             file_name="excelforge_output.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
-            use_container_width=True
+            use_container_width=True,
         )
-        
+
     with col2:
         if receipt:
             receipt_json = json.dumps(receipt, indent=2, ensure_ascii=False)
@@ -67,16 +69,23 @@ def main():
                 data=receipt_json,
                 file_name=f"receipt_{receipt.get('receipt_id', 'unknown')}.json",
                 mime="application/json",
-                use_container_width=True
+                use_container_width=True,
             )
 
     st.markdown("---")
-    
-    st.info("⚠ これはAIによる自動転記結果です。必ずダウンロードして内容をご確認ください。")
-    
-    st.button("🔄 別のファイルを処理する", on_click=reset_and_go_back, use_container_width=True)
+
+    st.info(
+        "⚠ これはAIによる自動転記結果です。必ずダウンロードして内容をご確認ください。"
+    )
+
+    st.button(
+        "🔄 別のファイルを処理する",
+        on_click=reset_and_go_back,
+        use_container_width=True,
+    )
 
     render_footer()
+
 
 if __name__ == "__main__":
     main()

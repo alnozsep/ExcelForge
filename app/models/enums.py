@@ -23,6 +23,7 @@ class ErrorCode(str, Enum):
 
 class AppException(Exception):
     """アプリケーション共通の例外基底クラス"""
+
     def __init__(self, error_code: ErrorCode, message: str, status_code: int = 400):
         self.error_code = error_code
         self.message = message

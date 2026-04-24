@@ -6,12 +6,11 @@ app/api/endpoints/process.py
 """
 
 import gc
-import io
 import time
 import hashlib
 import json
 import os
-from fastapi import APIRouter, UploadFile, File, Form, Depends
+from fastapi import APIRouter, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 
 from app.api.middleware.token_auth import verify_token
@@ -35,14 +34,14 @@ def _validate_file(upload_file: UploadFile, allowed_extensions: list[str]):
         raise AppException(
             error_code=ErrorCode.INVALID_FILE_TYPE,
             message=f"無効なファイル形式です。許可されている形式: {', '.join(allowed_extensions)}",
-            status_code=400
+            status_code=400,
         )
 
-    if getattr(upload_file, 'size', 0) > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+    if getattr(upload_file, "size", 0) > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
         raise AppException(
             error_code=ErrorCode.FILE_TOO_LARGE,
             message=f"ファイルサイズが上限({settings.MAX_UPLOAD_SIZE_MB}MB)を超えています",
-            status_code=413
+            status_code=413,
         )
 
 
@@ -62,7 +61,7 @@ async def process_files(
     source_file: UploadFile = File(...),
     template_file: UploadFile = File(...),
     token: str = Form(...),
-    mapping_config: str = Form(None)
+    mapping_config: str = Form(None),
 ):
     """
     処理手順（設計書 5.1節 Step6〜Step15 に完全準拠）:
@@ -84,7 +83,7 @@ async def process_files(
         start_time = time.monotonic()
 
         # Step 6: トークン検証
-        customer_name = verify_token(token)
+        _ = verify_token(token)
 
         # Step 7: バリデーション
         _validate_file(source_file, settings.ALLOWED_SOURCE_EXTENSIONS)
@@ -99,13 +98,13 @@ async def process_files(
             raise AppException(
                 error_code=ErrorCode.FILE_TOO_LARGE,
                 message=f"ファイルサイズが上限({settings.MAX_UPLOAD_SIZE_MB}MB)を超えています",
-                status_code=413
+                status_code=413,
             )
         if len(template_bytes) > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
             raise AppException(
                 error_code=ErrorCode.FILE_TOO_LARGE,
                 message=f"テンプレートファイルサイズが上限({settings.MAX_UPLOAD_SIZE_MB}MB)を超えています",
-                status_code=413
+                status_code=413,
             )
 
         file_type = detect_file_type(source_file.filename)
@@ -117,8 +116,7 @@ async def process_files(
         # Step 10: AI抽出（マスキング済みテキストを送信）
         parsed_mapping = json.loads(mapping_config) if mapping_config else None
         extraction_result = await extract_data(
-            masking_result.masked_text,
-            parsed_mapping
+            masking_result.masked_text, parsed_mapping
         )
         extracted_data = extraction_result.data
 
@@ -126,11 +124,7 @@ async def process_files(
         unmasked_data = _unmask_extracted_data(extracted_data, masking_result.mask_map)
 
         # Step 12: Excel書き込み（メモリ上で完結、ファイルシステムに書き込まない）
-        output_buffer = write_to_template(
-            template_bytes,
-            unmasked_data,
-            parsed_mapping
-        )
+        output_buffer = write_to_template(template_bytes, unmasked_data, parsed_mapping)
 
         # Step 13: レシート生成
         processing_time = time.monotonic() - start_time
@@ -141,7 +135,7 @@ async def process_files(
             template_hash=template_hash,
             source_type=file_type.value,
             source_size=len(source_bytes),
-            processing_time=processing_time
+            processing_time=processing_time,
         )
 
         # レシートをメモリキャッシュに保存（GET /api/v1/receipt/{id} で取得可能に）
@@ -149,28 +143,32 @@ async def process_files(
 
         # Step 14: レスポンス返却
         output_buffer.seek(0)
-        
+
         def iter_and_close(buf):
             try:
                 yield from buf
             finally:
                 buf.close()
-                
+
         return StreamingResponse(
             iter_and_close(output_buffer),
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={
-                "Content-Disposition": f'attachment; filename="excelforge_output.xlsx"',
-                "X-ExcelForge-Receipt": receipt.model_dump_json()
-            }
+                "Content-Disposition": 'attachment; filename="excelforge_output.xlsx"',
+                "X-ExcelForge-Receipt": receipt.model_dump_json(),
+            },
         )
 
     finally:
         # Step 15: 明示的クリーンアップ（メモリ解放）
         # output_buffer はジェネレータ内でcloseするためここから除外
         cleanup_variables(
-            source_bytes, template_bytes, source_text,
-            masking_result, extracted_data, unmasked_data,
-            receipt
+            source_bytes,
+            template_bytes,
+            source_text,
+            masking_result,
+            extracted_data,
+            unmasked_data,
+            receipt,
         )
         gc.collect()

@@ -19,18 +19,19 @@ app/core/file_reader.py
 
 
 import io
+import re
 from enum import Enum
 import pandas as pd
 import openpyxl
 import xlrd
 import fitz
 
+from app.config import settings
 from app.models.enums import FileReadError
 
-# config.py に追加 (本来は設定から取るが、ドキュメントの指示に従いハードコード、またはここで定義)
-MAX_TEXT_LENGTH: int = 100_000    # 最大10万文字
-MAX_PDF_PAGES: int = 20          # 最大20ページ
-MAX_ESTIMATED_TOKENS: int = 50_000  # 最大5万トークン（概算）
+# Zip爆弾対策用の安全制限値
+MAX_TEXT_LENGTH: int = 100_000       # 最大10万文字
+MAX_ESTIMATED_TOKENS: int = 50_000   # 最大5万トークン（概算）
 
 class FileType(Enum):
     PDF = "pdf"
@@ -93,16 +94,14 @@ def read_pdf(file_bytes: bytes) -> str:
         raise FileReadError("PDFファイルが空です。")
 
     text_parts = []
-    for i in range(min(len(doc), MAX_PDF_PAGES)):
+    for i in range(min(len(doc), settings.MAX_PDF_PAGES)):
         page = doc[i]
         page_text = page.get_text()
         text_parts.append(f"--- Page {i + 1} ---\n{page_text}")
 
     text = "\n".join(text_parts).strip()
     # ページヘッダのみ残って中身が空の場合の対応
-    text_only = text
-    import re
-    text_only = re.sub(r'--- Page \d+ ---', '', text_only).strip()
+    text_only = re.sub(r'--- Page \d+ ---', '', text).strip()
     if not text_only:
         raise FileReadError("テキストが抽出できませんでした（スキャンPDFは非対応です）。")
 

@@ -40,14 +40,21 @@ class ExtractionResult:
 
 
 def build_extraction_prompt(
-    source_text: str, mapping_config: Optional[dict] = None
+    source_text: str,
+    mapping_config: Optional[dict] = None,
+    template_text: Optional[str] = None,
 ) -> str:
     """
     Geminiに送信するプロンプトを組み立てる。
     """
     prompt = f"{SYSTEM_PROMPT}\n\n対象テキスト:\n{source_text}\n\n"
 
-    if mapping_config:
+    if template_text:
+        prompt += f"## エクセルテンプレートの構造\n{template_text}\n\n"
+        prompt += "指示: 上記のテンプレート構造を確認し、ソーステキストから抽出したデータを「どのセルの値を書き換えるべきか」を判断してください。\n"
+        prompt += "出力は以下のJSON形式としてください。キーは 'シート名:セル番地' とします:\n"
+        prompt += '{\n  "Sheet1:A1": "抽出値",\n  "Sheet1:B2": "抽出値"\n}\n'
+    elif mapping_config:
         prompt += "以下の項目を抽出し、指定された形式で出力してください:\n"
         prompt += "{\n"
 
@@ -94,7 +101,10 @@ def _parse_llm_response(response_text: str) -> dict:
 
 
 async def extract_data(
-    source_text: str, mapping_config: Optional[dict] = None, max_retries: int = 2
+    source_text: str,
+    mapping_config: Optional[dict] = None,
+    template_text: Optional[str] = None,
+    max_retries: int = 2,
 ) -> ExtractionResult:
     """
     Gemini APIを呼び出してデータ抽出を実行する。
@@ -102,7 +112,7 @@ async def extract_data(
     model = GenerativeModel(settings.GEMINI_MODEL)
     config = GenerationConfig(temperature=0.0)
 
-    base_prompt = build_extraction_prompt(source_text, mapping_config)
+    base_prompt = build_extraction_prompt(source_text, mapping_config, template_text)
     current_prompt = base_prompt
 
     for attempt in range(max_retries + 1):

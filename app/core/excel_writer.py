@@ -80,6 +80,26 @@ def write_to_template(
                 # 値を書き込み（元の書式は維持される）
                 target_cell.value = val
 
+        # 直接セル指定（Sheet:Cell形式）の書き込み
+        for key, val in extracted_data.items():
+            if val is None or not isinstance(key, str) or ":" not in key:
+                continue
+            
+            parts = key.split(":")
+            if len(parts) == 2:
+                sheet_name, cell_ref = parts
+                if sheet_name in wb.sheetnames:
+                    ws = wb[sheet_name]
+                    try:
+                        # セル番地が有効かチェック
+                        target_cell = ws[cell_ref]
+                        if _is_merged_cell(ws, target_cell):
+                            target_cell = _get_merged_cell_master(ws, target_cell)
+                        if not _has_formula(target_cell):
+                            target_cell.value = val
+                    except Exception:
+                        continue
+
         else:
             # mapping_configがない場合はプレースホルダー {{key}} を探して置換
             for sheet_name in wb.sheetnames:

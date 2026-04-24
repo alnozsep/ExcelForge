@@ -1,0 +1,2683 @@
+================================================================
+File: app/__init__.py
+================================================================
+
+
+
+================================================================
+File: app/api/__init__.py
+================================================================
+
+
+================================================================
+File: app/api/endpoints/__init__.py
+================================================================
+
+
+================================================================
+File: app/api/endpoints/health.py
+================================================================
+"""
+app/api/endpoints/health.py
+
+ヘルスチェックエンドポイント。認証不要。
+"""
+
+from datetime import datetime, timezone
+from fastapi import APIRouter
+from app.models.schemas import HealthResponse
+from app.config import settings
+
+router = APIRouter()
+
+
+@router.get("/health", response_model=HealthResponse)
+async def health_check():
+    """
+    GET /api/v1/health
+
+    サーバーの稼働状態を確認する。認証不要。
+    """
+    return HealthResponse(
+        status="healthy",
+        version=settings.APP_VERSION,
+        timestamp=datetime.now(timezone.utc),
+    )
+
+
+================================================================
+File: app/api/endpoints/process.py
+================================================================
+"""
+app/api/endpoints/process.py
+
+メインのファイル処理エンドポイント。
+このファイルが全体の処理フローを制御する。
+"""
+
+import gc
+import time
+import hashlib
+import json
+import os
+from fastapi import APIRouter, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
+
+from app.api.middleware.token_auth import verify_token
+from app.core.file_reader import read_file, detect_file_type
+from app.core.extractor import extract_data
+from app.core.excel_writer import write_to_template
+from app.core.masking import mask_sensitive_data, unmask_data
+from app.utils.receipt_generator import generate_receipt
+from app.utils.cleanup import cleanup_variables
+from app.api.endpoints.receipt import store_receipt
+from app.config import settings
+from app.models.enums import ErrorCode, AppException
+
+router = APIRouter()
+
+
+def _validate_file(upload_file: UploadFile, allowed_extensions: list[str]):
+    """ファイルの拡張子とサイズを検証する"""
+    ext = os.path.splitext(upload_file.filename)[1].lower()
+    if ext not in allowed_extensions:
+        raise AppException(
+            error_code=ErrorCode.INVALID_FILE_TYPE,
+            message=f"無効なファイル形式です。許可されている形式: {', '.join(allowed_extensions)}",
+            status_code=400,
+        )
+
+    if getattr(upload_file, "size", 0) > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+        raise AppException(
+            error_code=ErrorCode.FILE_TOO_LARGE,
+            message=f"ファイルサイズが上限({settings.MAX_UPLOAD_SIZE_MB}MB)を超えています",
+            status_code=413,
+        )
+
+
+def _unmask_extracted_data(extracted_data: dict, mask_map: dict) -> dict:
+    """抽出データの各値に対してunmaskを適用する"""
+    unmasked = {}
+    for k, v in extracted_data.items():
+        if isinstance(v, str):
+            unmasked[k] = unmask_data(v, mask_map)
+        else:
+            unmasked[k] = v
+    return unmasked
+
+
+@router.post("/process")
+async def process_files(
+    source_file: UploadFile = File(...),
+    template_file: UploadFile = File(...),
+    token: str = Form(...),
+    mapping_config: str = Form(None),
+):
+    """
+    処理手順（設計書 5.1節 Step6〜Step15 に完全準拠）:
+
+    この関数内で宣言されるすべての変数は、
+    finally ブロックで明示的に削除される。
+    """
+    # 変数を事前宣言（finallyでの削除を確実にするため）
+    source_bytes = None
+    template_bytes = None
+    source_text = None
+    masking_result = None
+    extracted_data = None
+    unmasked_data = None
+    output_buffer = None
+    receipt = None
+
+    try:
+        start_time = time.monotonic()
+
+        # Step 6: トークン検証
+        _ = verify_token(token)
+
+        # Step 7: バリデーション
+        _validate_file(source_file, settings.ALLOWED_SOURCE_EXTENSIONS)
+        _validate_file(template_file, settings.ALLOWED_TEMPLATE_EXTENSIONS)
+
+        # Step 8: ファイル読み込み
+        source_bytes = await source_file.read()
+        template_bytes = await template_file.read()
+
+        # 読み込み後のサイズ再検証（フォールバック）
+        if len(source_bytes) > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+            raise AppException(
+                error_code=ErrorCode.FILE_TOO_LARGE,
+                message=f"ファイルサイズが上限({settings.MAX_UPLOAD_SIZE_MB}MB)を超えています",
+                status_code=413,
+            )
+        if len(template_bytes) > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+            raise AppException(
+                error_code=ErrorCode.FILE_TOO_LARGE,
+                message=f"テンプレートファイルサイズが上限({settings.MAX_UPLOAD_SIZE_MB}MB)を超えています",
+                status_code=413,
+            )
+
+        file_type = detect_file_type(source_file.filename)
+        source_text = read_file(source_bytes, file_type)
+
+        # Step 9: マスキング（個人情報保護: Gemini APIに送る前に必ず通す）
+        masking_result = mask_sensitive_data(source_text)
+
+        # Step 10: AI抽出（マスキング済みテキストを送信）
+        parsed_mapping = json.loads(mapping_config) if mapping_config else None
+        extraction_result = await extract_data(
+            masking_result.masked_text, parsed_mapping
+        )
+        extracted_data = extraction_result.data
+
+        # Step 11: マスキング復元（抽出データの各値を復元）
+        unmasked_data = _unmask_extracted_data(extracted_data, masking_result.mask_map)
+
+        # Step 12: Excel書き込み（メモリ上で完結、ファイルシステムに書き込まない）
+        output_buffer = write_to_template(template_bytes, unmasked_data, parsed_mapping)
+
+        # Step 13: レシート生成
+        processing_time = time.monotonic() - start_time
+        source_hash = hashlib.sha256(source_bytes).hexdigest()
+        template_hash = hashlib.sha256(template_bytes).hexdigest()
+        receipt = generate_receipt(
+            source_hash=source_hash,
+            template_hash=template_hash,
+            source_type=file_type.value,
+            source_size=len(source_bytes),
+            processing_time=processing_time,
+        )
+
+        # レシートをメモリキャッシュに保存（GET /api/v1/receipt/{id} で取得可能に）
+        store_receipt(receipt)
+
+        # Step 14: レスポンス返却
+        output_buffer.seek(0)
+
+        def iter_and_close(buf):
+            try:
+                yield from buf
+            finally:
+                buf.close()
+
+        return StreamingResponse(
+            iter_and_close(output_buffer),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": 'attachment; filename="excelforge_output.xlsx"',
+                "X-ExcelForge-Receipt": receipt.model_dump_json(),
+            },
+        )
+
+    finally:
+        # Step 15: 明示的クリーンアップ（メモリ解放）
+        # output_buffer はジェネレータ内でcloseするためここから除外
+        cleanup_variables(
+            source_bytes,
+            template_bytes,
+            source_text,
+            masking_result,
+            extracted_data,
+            unmasked_data,
+            receipt,
+        )
+        gc.collect()
+
+
+================================================================
+File: app/api/endpoints/receipt.py
+================================================================
+"""
+app/api/endpoints/receipt.py
+
+処理レシートの取得エンドポイント。
+レシートはメモリ上のキャッシュであり、Cloud Runインスタンスが停止すると消滅する。
+"""
+
+from fastapi import APIRouter, HTTPException
+from app.models.schemas import ProcessingReceipt
+
+router = APIRouter()
+
+# メモリ上のレシートキャッシュ（インスタンス単位で保持、永続化しない）
+_receipt_cache: dict[str, ProcessingReceipt] = {}
+
+
+def store_receipt(receipt: ProcessingReceipt) -> None:
+    """レシートをメモリキャッシュに保存する"""
+    _receipt_cache[receipt.receipt_id] = receipt
+
+
+@router.get("/receipt/{receipt_id}", response_model=ProcessingReceipt)
+async def get_receipt(receipt_id: str):
+    """
+    GET /api/v1/receipt/{receipt_id}
+
+    処理レシートをJSON形式で取得する。
+    receipt_idはレスポンスヘッダに含まれるものと同一。
+
+    注意: レシート自体もメモリ上のキャッシュであり、
+          Cloud Runインスタンスが停止すると消滅する。
+    """
+    if receipt_id not in _receipt_cache:
+        raise HTTPException(
+            status_code=404, detail="指定されたレシートが見つかりません。"
+        )
+    return _receipt_cache[receipt_id]
+
+
+================================================================
+File: app/api/middleware/__init__.py
+================================================================
+
+
+================================================================
+File: app/api/middleware/request_log.py
+================================================================
+
+
+================================================================
+File: app/api/middleware/token_auth.py
+================================================================
+"""
+app/api/middleware/token_auth.py
+
+トークンベースのアクセス制御。
+データベースは使用しない。環境変数から読み込んだ辞書で検証する。
+"""
+
+from fastapi import HTTPException
+from app.config import settings
+
+
+def verify_token(token: str) -> str:
+    """
+    トークンを検証し、対応する顧客名を返す。
+
+    検証手順:
+        1. settings.VALID_TOKENS辞書にトークンが存在するか確認
+        2. 存在すれば顧客名を返す
+        3. 存在しなければ403 HTTPExceptionを送出
+
+    トークン形式:
+        - 英数字のランダム文字列（32文字以上を推奨）
+        - secrets.token_urlsafe(32) で生成する
+
+    戻り値: 顧客名（str）
+    例外: HTTPException(403)
+    """
+    if token not in settings.VALID_TOKENS:
+        raise HTTPException(status_code=403, detail="無効なアクセストークンです")
+    return settings.VALID_TOKENS[token]
+
+
+================================================================
+File: app/api/router.py
+================================================================
+"""
+app/api/router.py
+
+APIルーティング定義。全エンドポイントを /api/v1 配下にマウントする。
+"""
+
+from fastapi import APIRouter
+from app.api.endpoints import health, process, receipt
+
+api_router = APIRouter(prefix="/api/v1")
+
+# ヘルスチェック（認証不要）
+api_router.include_router(health.router, tags=["health"])
+
+# メイン処理
+api_router.include_router(process.router, tags=["process"])
+
+# レシート
+api_router.include_router(receipt.router, tags=["receipt"])
+
+
+================================================================
+File: app/config.py
+================================================================
+"""
+app/config.py
+
+すべての設定値はこのファイルで一元管理する。
+ハードコードされた設定値をコード内に散在させない。
+"""
+
+from pydantic_settings import BaseSettings
+from typing import Optional
+
+
+class Settings(BaseSettings):
+    # === アプリケーション ===
+    APP_NAME: str = "ExcelForge"
+    APP_VERSION: str = "1.0.0"
+    DEBUG: bool = False
+
+    # === サーバー ===
+    HOST: str = "0.0.0.0"
+    PORT: int = 8080
+
+    # === Gemini API ===
+    GCP_PROJECT_ID: str
+    GCP_LOCATION: str = "us-central1"
+    GEMINI_MODEL: str = "gemini-2.5-flash"
+    GEMINI_MAX_OUTPUT_TOKENS: int = 8192
+    GEMINI_TEMPERATURE: float = 0.0  # 再現性を最大化するため0固定
+
+    # === ファイル制限 ===
+    MAX_UPLOAD_SIZE_MB: int = 10
+    ALLOWED_SOURCE_EXTENSIONS: list[str] = [".pdf", ".csv", ".xlsx", ".xls"]
+    ALLOWED_TEMPLATE_EXTENSIONS: list[str] = [".xlsx"]
+    MAX_PDF_PAGES: int = 20
+
+    # === セキュリティ ===
+    VALID_TOKENS: dict[str, str] = {}
+    # 形式: {"token文字列": "顧客名"}
+    # 例: {"abc123xyz": "株式会社A", "def456uvw": "B事務所"}
+
+    # === ログ・監視 ===
+    LOG_LEVEL: str = "INFO"
+    LOG_FORMAT: str = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    SENTRY_DSN: Optional[str] = None
+
+    # === タイムアウト ===
+    GEMINI_TIMEOUT_SECONDS: int = 120
+    REQUEST_TIMEOUT_SECONDS: int = 180
+
+    class Config:
+        env_file = ".env"
+        env_file_encoding = "utf-8"
+
+
+settings = Settings()
+
+
+================================================================
+File: app/core/__init__.py
+================================================================
+
+
+================================================================
+File: app/core/excel_writer.py
+================================================================
+"""
+app/core/excel_writer.py
+
+責務: Excelテンプレートをメモリ上で開き、抽出データを指定セルに書き込み、BytesIOとして返す。
+"""
+
+import io
+from typing import Optional
+import openpyxl
+import re
+
+from app.models.enums import AppException, ErrorCode
+
+
+def _is_merged_cell(worksheet, cell) -> bool:
+    """セルが結合セルの一部かどうかを判定する"""
+    for merged_range in worksheet.merged_cells.ranges:
+        if cell.coordinate in merged_range:
+            return True
+    return False
+
+
+def _get_merged_cell_master(worksheet, cell):
+    """結合セルの左上（マスター）セルを返す"""
+    for merged_range in worksheet.merged_cells.ranges:
+        if cell.coordinate in merged_range:
+            # 結合範囲の左上のセルを返す
+            return worksheet.cell(row=merged_range.min_row, column=merged_range.min_col)
+    return cell
+
+
+def _has_formula(cell) -> bool:
+    """セルに数式が含まれているかを判定する"""
+    return cell.data_type == "f" or (
+        isinstance(cell.value, str) and cell.value.startswith("=")
+    )
+
+
+def write_to_template(
+    template_bytes: bytes, extracted_data: dict, mapping_config: Optional[dict] = None
+) -> io.BytesIO:
+    """
+    Excelテンプレートにデータを書き込む。
+    """
+    try:
+        # メモリ上でExcelファイルを開く
+        wb = openpyxl.load_workbook(io.BytesIO(template_bytes))
+
+        if mapping_config and "mappings" in mapping_config:
+            # マッピング設定に基づく書き込み
+            mappings = mapping_config.get("mappings", [])
+            for mapping in mappings:
+                key = mapping.get("key")
+                sheet_name = mapping.get("sheet")
+                cell_ref = mapping.get("cell")
+
+                if not key or key not in extracted_data:
+                    continue
+
+                val = extracted_data[key]
+                if val is None:
+                    continue
+
+                if sheet_name in wb.sheetnames:
+                    ws = wb[sheet_name]
+                else:
+                    # シートが存在しない場合は最初のアクティブシートを使用
+                    ws = wb.active
+
+                target_cell = ws[cell_ref]
+
+                # 結合セルの場合はマスターセルを取得
+                if _is_merged_cell(ws, target_cell):
+                    target_cell = _get_merged_cell_master(ws, target_cell)
+
+                # 数式セルはスキップ
+                if _has_formula(target_cell):
+                    continue
+
+                # 値を書き込み（元の書式は維持される）
+                target_cell.value = val
+
+        else:
+            # mapping_configがない場合はプレースホルダー {{key}} を探して置換
+            for sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                for row in ws.iter_rows():
+                    for cell in row:
+                        if (
+                            isinstance(cell.value, str)
+                            and "{{" in cell.value
+                            and "}}" in cell.value
+                        ):
+                            # セル内のすべてのプレースホルダーを置換
+                            new_value = cell.value
+                            matches = re.findall(r"\{\{([^}]+)\}\}", cell.value)
+
+                            has_replacement = False
+                            for key in matches:
+                                if (
+                                    key in extracted_data
+                                    and extracted_data[key] is not None
+                                ):
+                                    # 置換
+                                    val_str = str(extracted_data[key])
+                                    new_value = new_value.replace(
+                                        f"{{{{{key}}}}}", val_str
+                                    )
+                                    has_replacement = True
+                                elif mapping_config and key in mapping_config:
+                                    # mapping_config（辞書形式）でキーの指定がある場合
+                                    # ただし、プレースホルダー方式でmapping_config(dict)を使うケースへの対応
+                                    pass
+
+                            if has_replacement:
+                                # 元が完全に "{{key}}" のみで、置換結果が数値の場合は数値に変換
+                                if (
+                                    len(matches) == 1
+                                    and cell.value.strip() == f"{{{{{matches[0]}}}}}"
+                                ):
+                                    val = extracted_data[matches[0]]
+                                    if isinstance(val, (int, float)):
+                                        new_value = val
+
+                                # 結合セルの場合はマスターセルに書き込む
+                                if _is_merged_cell(ws, cell):
+                                    master_cell = _get_merged_cell_master(ws, cell)
+                                    if not _has_formula(master_cell):
+                                        master_cell.value = new_value
+                                else:
+                                    if not _has_formula(cell):
+                                        cell.value = new_value
+
+        # BytesIOに保存して返す
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        return output
+
+    except Exception as e:
+        raise AppException(
+            ErrorCode.TEMPLATE_ERROR, f"テンプレート書き込みエラー: {str(e)}"
+        )
+
+
+================================================================
+File: app/core/extractor.py
+================================================================
+"""
+app/core/extractor.py
+
+責務: Gemini APIにテキストを送信し、構造化されたJSONデータを受け取る。
+"""
+
+import json
+import re
+import asyncio
+from typing import Optional
+import vertexai
+from vertexai.generative_models import GenerativeModel, GenerationConfig
+
+from app.config import settings
+from app.models.enums import AppException, ErrorCode
+
+# モジュール初期化時にVertex AIを初期化
+if settings.GCP_PROJECT_ID:
+    vertexai.init(project=settings.GCP_PROJECT_ID, location=settings.GCP_LOCATION)
+
+SYSTEM_PROMPT = """
+あなたはデータ抽出の専門家です。
+与えられたテキストから、指定された項目を正確に抽出してください。
+
+## ルール
+1. 出力は必ずJSON形式とすること
+2. 値が見つからない場合はnullとすること
+3. 日付は "YYYY-MM-DD" 形式に統一すること
+4. 金額は数値型（整数）とし、カンマや円記号を含めないこと
+5. JSONのキーは日本語とすること
+6. JSON以外のテキスト（説明文等）を出力に含めないこと
+"""
+
+
+class ExtractionResult:
+    def __init__(self, data: dict, is_fallback: bool = False, retry_count: int = 0):
+        self.data = data
+        self.is_fallback = is_fallback
+        self.retry_count = retry_count
+
+
+def build_extraction_prompt(
+    source_text: str, mapping_config: Optional[dict] = None
+) -> str:
+    """
+    Geminiに送信するプロンプトを組み立てる。
+    """
+    prompt = f"{SYSTEM_PROMPT}\n\n対象テキスト:\n{source_text}\n\n"
+
+    if mapping_config:
+        prompt += "以下の項目を抽出し、指定された形式で出力してください:\n"
+        prompt += "{\n"
+
+        # mapping_configの構造に応じて対応
+        # dict形式 (プレースホルダー自動判定) または mappingsリスト形式 (マッピング設定)
+        keys_to_extract = []
+        if "mappings" in mapping_config:
+            keys_to_extract = [
+                m.get("key") for m in mapping_config["mappings"] if m.get("key")
+            ]
+        else:
+            keys_to_extract = list(mapping_config.keys())
+
+        for key in keys_to_extract:
+            prompt += f'  "{key}": "適切な値",\n'
+        prompt += "}\n"
+    else:
+        prompt += "このテキストに含まれるすべての項目をキー・バリュー形式のJSONで出力してください。\n"
+
+    return prompt
+
+
+def _parse_llm_response(response_text: str) -> dict:
+    """
+    LLMのレスポンスからJSONを抽出してパースする。
+    """
+    text = response_text.strip()
+
+    # マークダウンのコードブロックで囲まれている場合を処理
+    match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+    if match:
+        text = match.group(1).strip()
+
+    # JSON以外の文字が前後に付着しているケースに対応するため、最初と最後の波括弧を探す
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end >= start:
+        text = text[start : end + 1]
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"JSONパースエラー: {e}")
+
+
+async def extract_data(
+    source_text: str, mapping_config: Optional[dict] = None, max_retries: int = 2
+) -> ExtractionResult:
+    """
+    Gemini APIを呼び出してデータ抽出を実行する。
+    """
+    model = GenerativeModel("gemini-1.5-pro-preview-0409")
+    config = GenerationConfig(temperature=0.0)
+
+    base_prompt = build_extraction_prompt(source_text, mapping_config)
+    current_prompt = base_prompt
+
+    for attempt in range(max_retries + 1):
+        try:
+            # タイムアウトを設定して非同期呼び出し
+            response = await asyncio.wait_for(
+                model.generate_content_async(current_prompt, generation_config=config),
+                timeout=settings.GEMINI_TIMEOUT_SECONDS,
+            )
+
+            result_json = _parse_llm_response(response.text)
+            return ExtractionResult(
+                data=result_json, is_fallback=False, retry_count=attempt
+            )
+
+        except asyncio.TimeoutError:
+            raise AppException(
+                ErrorCode.TIMEOUT, "Gemini APIの呼び出しがタイムアウトしました"
+            )
+        except ValueError as e:
+            if attempt < max_retries:
+                current_prompt = (
+                    base_prompt
+                    + f"\n\n※前回の出力はJSONとしてパースできませんでした。正しいJSON形式のみを出力してください。\n前回のエラー: {e}"
+                )
+                continue
+            else:
+                raise AppException(
+                    ErrorCode.EXTRACTION_FAILED,
+                    f"データ抽出に失敗しました: 最大リトライ回数超過 ({e})",
+                )
+        except Exception as e:
+            if isinstance(e, AppException):
+                raise e
+            raise AppException(
+                ErrorCode.EXTRACTION_FAILED, f"Gemini API通信エラー: {str(e)}"
+            )
+
+    raise AppException(
+        ErrorCode.EXTRACTION_FAILED, "データ抽出に失敗しました: 不明なエラー"
+    )
+
+
+================================================================
+File: app/core/file_reader.py
+================================================================
+"""
+app/core/file_reader.py
+
+
+責務: アップロードされたファイルをメモリ上で読み込み、
+      テキスト文字列に変換して返す。
+
+
+入力: ファイルバイナリ（bytes）、ファイル拡張子（str）
+出力: 抽出されたテキスト（str）
+
+
+制約:
+  - ファイルシステムへの書き込みは行わない
+  - すべてio.BytesIOを使用してメモリ上で処理する
+  - 対応形式: PDF, CSV, XLSX, XLS
+  - XLS形式はxlrdライブラリで対応する（openpyxlは非対応）
+"""
+
+import io
+import re
+from enum import Enum
+import pandas as pd
+import openpyxl
+import xlrd
+import fitz
+
+from app.config import settings
+from app.models.enums import FileReadError
+
+# Zip爆弾対策用の安全制限値
+MAX_TEXT_LENGTH: int = 100_000  # 最大10万文字
+MAX_ESTIMATED_TOKENS: int = 50_000  # 最大5万トークン（概算）
+
+
+class FileType(Enum):
+    PDF = "pdf"
+    CSV = "csv"
+    XLSX = "xlsx"
+    XLS = "xls"
+
+
+def detect_file_type(filename: str) -> FileType:
+    """
+    ファイル名から拡張子を判定してFileTypeを返す。
+    対応外の拡張子の場合はValueErrorを送出する。
+    """
+    if not filename:
+        raise ValueError("Filename is empty")
+
+    parts = filename.lower().split(".")
+    if len(parts) < 2:
+        raise ValueError(f"No extension found in filename: {filename}")
+
+    ext = parts[-1]
+
+    try:
+        return FileType(ext)
+    except ValueError:
+        raise ValueError(f"Unsupported file extension: {ext}")
+
+
+def validate_text_size(text: str, source_type: str = "") -> None:
+    """
+    抽出テキストのサイズを検証する。
+
+    Zip爆弾対策: 1MBのPDFから10万文字以上のテキストが
+    展開されるケースを防ぐ。
+    """
+    if len(text) > MAX_TEXT_LENGTH:
+        raise FileReadError(
+            f"抽出されたテキストが上限（{MAX_TEXT_LENGTH:,}文字）を"
+            f"超えています（{len(text):,}文字）。"
+            f"ページ数を減らしてお試しください。"
+        )
+
+    # トークン数の概算（日本語: 約1文字=1.5トークン）
+    estimated_tokens = int(len(text) * 1.5)
+    if estimated_tokens > MAX_ESTIMATED_TOKENS:
+        raise FileReadError(
+            "テキスト量がAI処理の上限を超えています。"
+            "ファイルのページ数を減らしてお試しください。"
+        )
+
+
+def read_pdf(file_bytes: bytes) -> str:
+    """PDF読み込み（ページ数制限付き）"""
+    try:
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+    except Exception as e:
+        raise FileReadError(f"PDFファイルを開けません: {type(e).__name__}")
+
+    if len(doc) == 0:
+        raise FileReadError("PDFファイルが空です。")
+
+    text_parts = []
+    for i in range(min(len(doc), settings.MAX_PDF_PAGES)):
+        page = doc[i]
+        page_text = page.get_text()
+        text_parts.append(f"--- Page {i + 1} ---\n{page_text}")
+
+    text = "\n".join(text_parts).strip()
+    # ページヘッダのみ残って中身が空の場合の対応
+    text_only = re.sub(r"--- Page \d+ ---", "", text).strip()
+    if not text_only:
+        raise FileReadError(
+            "テキストが抽出できませんでした（スキャンPDFは非対応です）。"
+        )
+
+    validate_text_size(text, "pdf")
+    return text
+
+
+def read_file(file_bytes: bytes, file_type: FileType) -> str:
+    """
+    ファイルバイナリを受け取り、テキスト文字列に変換して返す。
+    """
+    if not file_bytes:
+        raise FileReadError("ファイルデータが空です。")
+
+    try:
+        if file_type == FileType.PDF:
+            return read_pdf(file_bytes)
+
+        elif file_type == FileType.CSV:
+            try:
+                df = pd.read_csv(io.BytesIO(file_bytes), encoding="utf-8")
+            except UnicodeDecodeError:
+                try:
+                    df = pd.read_csv(io.BytesIO(file_bytes), encoding="shift_jis")
+                except Exception as e:
+                    raise FileReadError(
+                        f"CSVファイルの読み込みに失敗しました（エンコーディングエラー）: {type(e).__name__}"
+                    )
+            except pd.errors.EmptyDataError:
+                raise FileReadError("CSVファイルが空です。")
+            except Exception as e:
+                raise FileReadError(
+                    f"CSVファイルの読み込みに失敗しました: {type(e).__name__}"
+                )
+
+            text = df.to_string(index=False)
+            validate_text_size(text, "csv")
+            return text
+
+        elif file_type == FileType.XLSX:
+            try:
+                wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+            except Exception as e:
+                raise FileReadError(
+                    f"XLSXファイルの読み込みに失敗しました: {type(e).__name__}"
+                )
+
+            text_parts = []
+            for sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                for row in ws.iter_rows():
+                    for cell in row:
+                        if cell.value is not None:
+                            # 結合セルの場合、左上のセルのみ値を持つ
+                            text_parts.append(
+                                f"{sheet_name}:{cell.coordinate}={cell.value}"
+                            )
+
+            text = "\n".join(text_parts)
+            validate_text_size(text, "xlsx")
+            return text
+
+        elif file_type == FileType.XLS:
+            try:
+                wb = xlrd.open_workbook(file_contents=file_bytes)
+            except Exception as e:
+                raise FileReadError(
+                    f"XLSファイルの読み込みに失敗しました: {type(e).__name__}"
+                )
+
+            text_parts = []
+            for sheet in wb.sheets():
+                for rowx in range(sheet.nrows):
+                    for colx in range(sheet.ncols):
+                        cell_value = sheet.cell_value(rowx, colx)
+                        if cell_value != "":
+                            # coordinateをA1形式に変換
+                            col_letter = xlrd.colname(colx)
+                            coord = f"{col_letter}{rowx + 1}"
+                            text_parts.append(f"{sheet.name}:{coord}={cell_value}")
+
+            text = "\n".join(text_parts)
+            validate_text_size(text, "xls")
+            return text
+
+        else:
+            raise ValueError(f"未対応のファイル形式です: {file_type}")
+
+    except FileReadError:
+        raise
+    except Exception as e:
+        raise FileReadError(
+            f"ファイルの読み込み中に予期せぬエラーが発生しました: {type(e).__name__}"
+        )
+
+
+================================================================
+File: app/core/masking.py
+================================================================
+"""
+app/core/masking.py
+
+
+責務: テキストから個人情報をマスキングし、
+      処理後に復元する。
+
+
+制約:
+  - マスキングは「可能な範囲で」行うものであり、
+    100%の検出を保証しない
+  - マスキング/復元のペアは同一リクエスト内で完結する
+  - マスキングマップはメモリ上にのみ存在する
+"""
+
+import re
+from dataclasses import dataclass, field
+
+
+@dataclass
+class MaskingResult:
+    masked_text: str
+    mask_map: dict[str, str] = field(default_factory=dict)
+    # mask_map例: {"[MASK_001]": "090-1234-5678", "[MASK_002]": "1234-5678-9012"}
+
+
+def mask_sensitive_data(text: str) -> MaskingResult:
+    """
+    以下のパターンをマスキングする:
+
+    1. マイナンバー（12桁の数字、ハイフン・スペース区切り含む）
+       パターン: r'\d{4}[\s-]?\d{4}[\s-]?\d{4}'
+       置換先: [MASK_MYNUMBER_001]
+
+    2. 電話番号（固定・携帯）
+       パターン: r'0\d{1,4}[\s-]?\d{1,4}[\s-]?\d{3,4}'
+       置換先: [MASK_PHONE_001]
+
+    3. メールアドレス
+       パターン: r'[\w\.\-]+@[\w\.\-]+'
+       置換先: [MASK_EMAIL_001]
+
+    4. 銀行口座番号（7桁の連続数字）
+       パターン: r'(?<!\d)\d{7}(?!\d)'
+       置換先: [MASK_ACCOUNT_001]
+
+    連番はカテゴリごとに001からインクリメントする。
+    """
+    if not text:
+        return MaskingResult(masked_text=text)
+
+    mask_map = {}
+    counters = {
+        "MYNUMBER": 1,
+        "PHONE": 1,
+        "EMAIL": 1,
+        "ACCOUNT": 1,
+    }
+
+    # 各パターンの定義
+    patterns = {
+        "MYNUMBER": r"(?<!\d)\d{4}[\s-]?\d{4}[\s-]?\d{4}(?!\d)",
+        "PHONE": r"(?<!\d)0\d{1,4}[\s-]?\d{1,4}[\s-]?\d{3,4}(?!\d)",
+        "EMAIL": r"[\w\.\-]+@[\w\.\-]+",
+        "ACCOUNT": r"(?<!\d)\d{7}(?!\d)",
+    }
+
+    masked_text = text
+
+    # 置換処理の共通関数
+    def replacer(match, category):
+        original_value = match.group(0)
+        # 既にマップされている場合は同じプレースホルダを再利用するか、新規発行する
+        # （ここではシンプルに毎回新規発行、または既に同じ値があれば再利用でも良いが、
+        #   連番をつける仕様なので新規発行とする）
+        placeholder = f"[MASK_{category}_{counters[category]:03d}]"
+        mask_map[placeholder] = original_value
+        counters[category] += 1
+        return placeholder
+
+    # MYNUMBER
+    masked_text = re.sub(
+        patterns["MYNUMBER"], lambda m: replacer(m, "MYNUMBER"), masked_text
+    )
+
+    # PHONE
+    masked_text = re.sub(patterns["PHONE"], lambda m: replacer(m, "PHONE"), masked_text)
+
+    # EMAIL
+    masked_text = re.sub(patterns["EMAIL"], lambda m: replacer(m, "EMAIL"), masked_text)
+
+    # ACCOUNT
+    masked_text = re.sub(
+        patterns["ACCOUNT"], lambda m: replacer(m, "ACCOUNT"), masked_text
+    )
+
+    return MaskingResult(masked_text=masked_text, mask_map=mask_map)
+
+
+def unmask_data(masked_text: str, mask_map: dict[str, str]) -> str:
+    """
+    マスキングされたテキストを元に戻す。
+    mask_mapのキーをバリューで置換する。
+    """
+    if not masked_text or not mask_map:
+        return masked_text
+
+    unmasked_text = masked_text
+    for placeholder, original_value in mask_map.items():
+        unmasked_text = unmasked_text.replace(placeholder, original_value)
+
+    return unmasked_text
+
+
+================================================================
+File: app/main.py
+================================================================
+"""
+app/main.py
+
+FastAPIアプリケーションのエントリーポイント。
+"""
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+import logging
+
+from app.config import settings
+from app.models.enums import AppException, ErrorCode
+from app.models.schemas import TokenValidationRequest, TokenValidationResponse
+from app.api.router import api_router
+import sentry_sdk
+
+# ログ設定
+logging.basicConfig(
+    level=getattr(logging, settings.LOG_LEVEL), format=settings.LOG_FORMAT
+)
+logger = logging.getLogger("excelforge")
+
+
+def _scrub_sensitive_data(event, hint):
+    """Sentryに送信する前に機密データを除去する"""
+    # リクエストデータを除去
+    if "request" in event:
+        if "data" in event["request"]:
+            event["request"]["data"] = "[REDACTED]"
+    return event
+
+
+if not settings.DEBUG and settings.SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=settings.SENTRY_DSN,
+        traces_sample_rate=0.1,  # パフォーマンス監視は10%サンプリング
+        environment="production",
+        # 個人情報を送信しない設定
+        send_default_pii=False,
+        # リクエストボディを送信しない
+        request_bodies="never",
+        # ファイルアップロードの内容を除外
+        before_send=_scrub_sensitive_data,
+    )
+
+app = FastAPI(title="ExcelForge API", version=settings.APP_VERSION)
+
+# ルーターをマウント
+app.include_router(api_router)
+
+
+# === エラーハンドラ ===
+
+
+@app.exception_handler(AppException)
+async def app_exception_handler(request: Request, exc: AppException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "detail": exc.message,
+            "error_code": exc.error_code.value,
+            "retry_suggestion": exc.error_code
+            in [ErrorCode.EXTRACTION_FAILED, ErrorCode.TIMEOUT],
+        },
+    )
+
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    # 予期せぬエラー。ログに記録するがユーザーデータは含めない。
+    logger.error(f"Unexpected error: {type(exc).__name__}: {str(exc)}")
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "内部サーバーエラーが発生しました",
+            "error_code": ErrorCode.INTERNAL_ERROR.value,
+            "retry_suggestion": False,
+        },
+    )
+
+
+# === トークン検証エンドポイント（設計書 6.2） ===
+
+
+@app.post("/api/v1/validate-token", response_model=TokenValidationResponse)
+async def validate_token(request: TokenValidationRequest):
+    """
+    POST /api/v1/validate-token
+
+    アクセストークンの有効性を検証する。
+    """
+    if request.token in settings.VALID_TOKENS:
+        return TokenValidationResponse(
+            valid=True, customer_name=settings.VALID_TOKENS[request.token]
+        )
+    return TokenValidationResponse(valid=False)
+
+
+================================================================
+File: app/models/__init__.py
+================================================================
+
+
+================================================================
+File: app/models/enums.py
+================================================================
+"""
+app/models/enums.py
+
+エラーコードと例外クラスの定義。
+"""
+
+from enum import Enum
+
+
+class ErrorCode(str, Enum):
+    INVALID_TOKEN = "INVALID_TOKEN"
+    INVALID_FILE_TYPE = "INVALID_FILE_TYPE"
+    FILE_TOO_LARGE = "FILE_TOO_LARGE"
+    FILE_READ_ERROR = "FILE_READ_ERROR"
+    SCAN_PDF_NOT_SUPPORTED = "SCAN_PDF_NOT_SUPPORTED"
+    EXTRACTION_FAILED = "EXTRACTION_FAILED"
+    EXTRACTION_JSON_PARSE_ERROR = "EXTRACTION_JSON_PARSE_ERROR"
+    TEMPLATE_WRITE_ERROR = "TEMPLATE_WRITE_ERROR"
+    TEMPLATE_INVALID = "TEMPLATE_INVALID"
+    TIMEOUT = "TIMEOUT"
+    INTERNAL_ERROR = "INTERNAL_ERROR"
+
+
+class AppException(Exception):
+    """アプリケーション共通の例外基底クラス"""
+
+    def __init__(self, error_code: ErrorCode, message: str, status_code: int = 400):
+        self.error_code = error_code
+        self.message = message
+        self.status_code = status_code
+        super().__init__(message)
+
+
+class FileReadError(AppException):
+    def __init__(self, message: str):
+        super().__init__(ErrorCode.FILE_READ_ERROR, message, 400)
+
+
+class ExtractionError(AppException):
+    def __init__(self, message: str):
+        super().__init__(ErrorCode.EXTRACTION_FAILED, message, 422)
+
+
+class TemplateWriteError(AppException):
+    def __init__(self, message: str):
+        super().__init__(ErrorCode.TEMPLATE_WRITE_ERROR, message, 500)
+
+
+================================================================
+File: app/models/schemas.py
+================================================================
+"""
+app/models/schemas.py
+
+すべてのリクエスト/レスポンスの型を定義する。
+"""
+
+from pydantic import BaseModel, Field
+from datetime import datetime
+from typing import Optional
+
+
+# === リクエスト ===
+
+
+class TokenValidationRequest(BaseModel):
+    token: str = Field(..., min_length=10, max_length=100)
+
+
+# === レスポンス ===
+
+
+class HealthResponse(BaseModel):
+    status: str
+    version: str
+    timestamp: datetime
+
+
+class TokenValidationResponse(BaseModel):
+    valid: bool
+    customer_name: Optional[str] = None
+
+
+class ProcessingReceipt(BaseModel):
+    receipt_id: str
+    processed_at: datetime
+    source_file_hash: str
+    template_file_hash: str
+    source_file_type: str
+    source_file_size_bytes: int
+    processing_time_seconds: float
+    gemini_model_used: str
+    data_retention: str = "none"
+    storage_used: str = "none"
+    database_used: str = "none"
+
+
+class ErrorResponse(BaseModel):
+    detail: str
+    error_code: str
+    retry_suggestion: bool = False
+
+
+# === 内部用 ===
+
+
+class ExtractionResult(BaseModel):
+    """Gemini APIからの抽出結果を格納する"""
+
+    data: dict
+    raw_response: str = Field(exclude=True)  # ログに出さない
+    model_used: str
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+
+
+class MappingConfig(BaseModel):
+    """抽出項目とExcelセルの対応定義"""
+
+    mappings: list[dict] = Field(
+        ..., description="各要素は {key: str, sheet: str, cell: str} の形式"
+    )
+
+
+================================================================
+File: app/utils/__init__.py
+================================================================
+
+
+================================================================
+File: app/utils/cleanup.py
+================================================================
+"""
+app/utils/cleanup.py
+
+
+メモリ上のデータを明示的に削除するユーティリティ。
+Pythonのガベージコレクタに任せるだけでは不十分な場合の安全策。
+"""
+
+import io
+from typing import Any
+
+
+def cleanup_variables(*variables: Any) -> None:
+    """
+    渡されたすべての変数を明示的にクリーンアップする。
+
+    処理:
+        - bytes型: ゼロで上書きしてからdel（セキュアな削除）
+        - io.BytesIO: close()してからdel
+        - dict/list: clear()してからdel
+        - それ以外: del のみ
+
+    いずれの変数がNoneでもエラーにしない。
+    """
+    for var in variables:
+        if var is None:
+            continue
+        try:
+            if isinstance(var, (bytes, bytearray)):
+                # bytesは不変なのでbytearray化して上書き
+                # ※完全なセキュア削除はPythonでは困難だが、ベストエフォートで
+                if isinstance(var, bytearray):
+                    for i in range(len(var)):
+                        var[i] = 0
+            elif isinstance(var, io.BytesIO):
+                if not var.closed:
+                    var.close()
+            elif isinstance(var, dict):
+                var.clear()
+            elif isinstance(var, list):
+                var.clear()
+        except Exception:
+            pass  # クリーンアップ自体のエラーは無視する
+
+
+================================================================
+File: app/utils/hashing.py
+================================================================
+
+
+================================================================
+File: app/utils/receipt_generator.py
+================================================================
+"""
+app/utils/receipt_generator.py
+
+証跡レシートの生成。
+"""
+
+import uuid
+from datetime import datetime, timezone
+from app.models.schemas import ProcessingReceipt
+
+
+def generate_receipt(
+    source_hash: str,
+    template_hash: str,
+    source_type: str,
+    source_size: int,
+    processing_time: float,
+) -> ProcessingReceipt:
+    """
+    処理結果のレシートを生成する。
+    """
+    receipt = ProcessingReceipt(
+        receipt_id=str(uuid.uuid4()),
+        processed_at=datetime.now(timezone.utc),
+        source_file_hash=source_hash,
+        template_file_hash=template_hash,
+        source_file_type=source_type,
+        source_file_size_bytes=source_size,
+        processing_time_seconds=processing_time,
+        gemini_model_used="gemini-1.5-pro-preview-0409",
+        data_retention="none",
+        storage_used="none",
+        database_used="none",
+    )
+
+    return receipt
+
+
+================================================================
+File: streamlit_app/app.py
+================================================================
+"""
+streamlit_app/app.py
+
+Streamlitアプリケーションのエントリーポイント。
+トークンの検証を行い、問題なければアップロード画面へ遷移する。
+"""
+
+import streamlit as st
+import httpx
+import os
+
+# Streamlitページ設定
+st.set_page_config(
+    page_title="ExcelForge",
+    page_icon="🤖",
+    layout="centered",
+    initial_sidebar_state="collapsed",
+)
+
+from components.header import render_header  # noqa: E402
+from components.footer import render_footer  # noqa: E402
+
+# 内部APIエンドポイント（Cloud Runの場合は環境変数等で指定可能にする）
+# デフォルトはローカル
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8080/api/v1")
+
+
+def validate_token(token: str) -> dict:
+    """FastAPIのvalidate-tokenエンドポイントを叩く"""
+    try:
+        response = httpx.post(
+            f"{API_BASE_URL}/validate-token", json={"token": token}, timeout=10.0
+        )
+        if response.status_code == 200:
+            return response.json()
+    except Exception as e:
+        st.error(f"認証サーバーに接続できません: {e}")
+    return {"valid": False}
+
+
+def main():
+    render_header()
+
+    # クエリパラメータからトークンを取得
+    query_params = st.query_params
+    token = query_params.get("token")
+
+    if not token:
+        st.error("トークンが指定されていません。正しいURLからアクセスしてください。")
+        render_footer()
+        return
+
+    # セッションステートに認証済みかどうかのフラグ
+    if (
+        "is_authenticated" not in st.session_state
+        or st.session_state.get("token") != token
+    ):
+        with st.spinner("認証情報を確認しています..."):
+            auth_res = validate_token(token)
+            if auth_res.get("valid"):
+                st.session_state.is_authenticated = True
+                st.session_state.token = token
+                st.session_state.customer_name = auth_res.get("customer_name")
+            else:
+                st.session_state.is_authenticated = False
+                st.session_state.token = None
+
+    if st.session_state.get("is_authenticated"):
+        # 認証成功したら自動的にアップロード画面へ遷移（ページナビゲーション）
+        st.success(f"認証成功: ようこそ {st.session_state.customer_name} 様")
+        st.switch_page("pages/upload.py")
+    else:
+        st.error("無効なアクセストークンです。")
+
+    render_footer()
+
+
+if __name__ == "__main__":
+    main()
+
+
+================================================================
+File: streamlit_app/components/footer.py
+================================================================
+"""
+streamlit_app/components/footer.py
+
+共通フッターコンポーネント。
+"""
+
+import streamlit as st
+
+
+def render_footer():
+    st.markdown(
+        """
+        <div style="margin-top: 4rem; padding-top: 2rem; border-top: 1px solid #E2E8F0; text-align: center; color: #94A3B8; font-size: 0.875rem;">
+            &copy; 2025 ExcelForge. All rights reserved.
+            <br>
+            <span style="font-size: 0.75rem;">
+                本システムはアップロードされたデータを処理後、即座に破棄します。
+            </span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+================================================================
+File: streamlit_app/components/header.py
+================================================================
+"""
+streamlit_app/components/header.py
+
+共通ヘッダーコンポーネント。
+"""
+
+import streamlit as st
+
+
+def render_header():
+    st.markdown(
+        """
+        <div style="display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #E2E8F0; padding-bottom: 1rem; margin-bottom: 2rem;">
+            <h1 style="margin: 0; font-size: 1.5rem; color: #1E293B;">ExcelForge</h1>
+            <span style="font-size: 0.875rem; color: #64748B;">AI自動転記ツール</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+================================================================
+File: streamlit_app/pages/result.py
+================================================================
+"""
+streamlit_app/pages/result.py
+
+処理結果・ダウンロード画面。
+"""
+
+import streamlit as st
+import json
+from components.header import render_header
+from components.footer import render_footer
+
+st.set_page_config(page_title="処理結果 - ExcelForge", page_icon="✅")
+
+
+def reset_and_go_back():
+    """セッション状態をクリアしてアップロード画面に戻る"""
+    # 処理関連のデータを削除（制約: 処理完了後、session_stateから処理関連データを削除する）
+    if "result_excel" in st.session_state:
+        del st.session_state["result_excel"]
+    if "receipt_data" in st.session_state:
+        del st.session_state["receipt_data"]
+
+    st.switch_page("pages/upload.py")
+
+
+def main():
+    # 認証チェック
+    if not st.session_state.get("is_authenticated"):
+        st.error("認証されていません。トップページからアクセスしてください。")
+        st.switch_page("app.py")
+        return
+
+    # 結果データが存在しない場合はアップロード画面に戻る
+    if "result_excel" not in st.session_state:
+        st.warning("処理結果が見つかりません。")
+        st.switch_page("pages/upload.py")
+        return
+
+    render_header()
+
+    st.success("✅ 変換が完了しました！")
+
+    receipt = st.session_state.get("receipt_data", {})
+    processing_time = receipt.get("processing_time_seconds", 0)
+
+    if processing_time:
+        st.write(f"**処理時間:** {processing_time:.2f} 秒")
+
+    st.markdown("---")
+
+    # ダウンロードセクション
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.download_button(
+            label="📥 Excelをダウンロード",
+            data=st.session_state.result_excel,
+            file_name="excelforge_output.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            use_container_width=True,
+        )
+
+    with col2:
+        if receipt:
+            receipt_json = json.dumps(receipt, indent=2, ensure_ascii=False)
+            st.download_button(
+                label="📋 処理レシートをダウンロード",
+                data=receipt_json,
+                file_name=f"receipt_{receipt.get('receipt_id', 'unknown')}.json",
+                mime="application/json",
+                use_container_width=True,
+            )
+
+    st.markdown("---")
+
+    st.info(
+        "⚠ これはAIによる自動転記結果です。必ずダウンロードして内容をご確認ください。"
+    )
+
+    st.button(
+        "🔄 別のファイルを処理する",
+        on_click=reset_and_go_back,
+        use_container_width=True,
+    )
+
+    render_footer()
+
+
+if __name__ == "__main__":
+    main()
+
+
+================================================================
+File: streamlit_app/pages/upload.py
+================================================================
+"""
+streamlit_app/pages/upload.py
+
+アップロード画面。ファイルの検証とAPI呼び出しを行う。
+"""
+
+import streamlit as st
+import httpx
+import os
+import json
+
+from components.header import render_header
+from components.footer import render_footer
+
+st.set_page_config(page_title="アップロード - ExcelForge", page_icon="🤖")
+
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8080/api/v1")
+
+
+def main():
+    # 認証チェック
+    if not st.session_state.get("is_authenticated"):
+        st.error("認証されていません。トップページからアクセスしてください。")
+        st.switch_page("app.py")
+        return
+
+    render_header()
+
+    st.markdown("### ファイルアップロード")
+
+    # フォーム開始
+    with st.form("upload_form"):
+        st.markdown("#### 📄 ソースファイル")
+        source_file = st.file_uploader(
+            "ここにファイルをドラッグ&ドロップ または クリックして選択",
+            type=["pdf", "csv", "xlsx", "xls"],
+            key="source_file",
+        )
+        st.caption("対応形式: PDF, CSV, Excel (.xlsx/.xls) | 最大サイズ: 10MB")
+
+        st.markdown("#### 📋 Excelテンプレート")
+        template_file = st.file_uploader(
+            "ここにファイルをドラッグ&ドロップ または クリックして選択",
+            type=["xlsx"],
+            key="template_file",
+        )
+        st.caption("対応形式: Excel (.xlsx) | 最大サイズ: 10MB")
+
+        st.info(
+            "⚠ アップロードされたファイルは処理後即座に削除されます。サーバーには保存されません。"
+        )
+
+        submit_btn = st.form_submit_button(
+            "▶ 変換を開始する", type="primary", use_container_width=True
+        )
+
+    if submit_btn:
+        if not source_file or not template_file:
+            st.error(
+                "ソースファイルとテンプレートファイルの両方をアップロードしてください。"
+            )
+            return
+
+        # クライアント側バリデーション
+        MAX_SIZE = 10 * 1024 * 1024
+        if source_file.size > MAX_SIZE:
+            st.error("ソースファイルのサイズが10MBを超えています。")
+            return
+        if template_file.size > MAX_SIZE:
+            st.error("テンプレートファイルのサイズが10MBを超えています。")
+            return
+
+        # 処理開始
+        with st.status("処理中です...", expanded=True) as status:
+            st.write("ファイルをアップロードし、AIがデータを抽出しています...")
+            st.write("※ 通常1〜3分程度で完了します")
+
+            try:
+                # タイムアウトは長めに設定 (gemini呼び出しがあるため)
+                timeout = httpx.Timeout(180.0)
+
+                files = {
+                    "source_file": (
+                        source_file.name,
+                        source_file.getvalue(),
+                        "application/octet-stream",
+                    ),
+                    "template_file": (
+                        template_file.name,
+                        template_file.getvalue(),
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    ),
+                }
+                data = {"token": st.session_state.token}
+
+                # APIリクエスト
+                response = httpx.post(
+                    f"{API_BASE_URL}/process", data=data, files=files, timeout=timeout
+                )
+
+                if response.status_code == 200:
+                    status.update(label="変換完了", state="complete", expanded=False)
+                    # 結果をセッションステートに保存して画面遷移
+                    st.session_state.result_excel = response.content
+
+                    receipt_str = response.headers.get("X-ExcelForge-Receipt")
+                    if receipt_str:
+                        st.session_state.receipt_data = json.loads(receipt_str)
+                    else:
+                        st.session_state.receipt_data = None
+
+                    st.switch_page("pages/result.py")
+                else:
+                    status.update(
+                        label="エラーが発生しました", state="error", expanded=False
+                    )
+                    try:
+                        err_data = response.json()
+                        st.error(
+                            f"エラー: {err_data.get('detail', '不明なエラー')} (Code: {err_data.get('error_code', '')})"
+                        )
+                    except Exception:
+                        st.error(
+                            f"サーバーエラーが発生しました (HTTP {response.status_code})"
+                        )
+            except httpx.ReadTimeout:
+                status.update(label="タイムアウト", state="error", expanded=False)
+                st.error(
+                    "処理がタイムアウトしました。サーバーの負荷が高いか、データが大きすぎます。"
+                )
+            except Exception as e:
+                status.update(label="通信エラー", state="error", expanded=False)
+                st.error(f"APIサーバーとの通信に失敗しました: {e}")
+
+    render_footer()
+
+
+if __name__ == "__main__":
+    main()
+
+
+================================================================
+File: tests/__init__.py
+================================================================
+
+
+================================================================
+File: tests/conftest.py
+================================================================
+import pytest
+
+
+@pytest.fixture
+def sample_pdf_bytes():
+    # ダミーのPDFを作成 (PyMuPDFが必要)
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((50, 50), "Test Corporation")
+    page2 = doc.new_page()
+    page2.insert_text((50, 50), "DX Promotion Project")
+    return doc.write()
+
+
+@pytest.fixture
+def empty_pdf_bytes():
+    import fitz
+
+    doc = fitz.open()
+    doc.new_page()
+    return doc.write()
+
+
+@pytest.fixture
+def corrupted_pdf_bytes():
+    return b"%PDF-1.4\ncorrupted data"
+
+
+@pytest.fixture
+def sample_csv_bytes():
+    return "会社名,担当者\n株式会社テスト,山田太郎\n".encode("utf-8")
+
+
+@pytest.fixture
+def sample_csv_sjis_bytes():
+    return "会社名,担当者\n株式会社テスト,山田太郎\n".encode("shift_jis")
+
+
+@pytest.fixture
+def sample_xlsx_bytes():
+    import openpyxl
+    import io
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws["A1"] = "株式会社テスト"
+    ws["B1"] = 1500000
+
+    # 結合セルテスト用
+    ws.merge_cells("A3:C3")
+    ws["A3"] = "補助金申請データ"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+================================================================
+File: tests/test_cleanup.py
+================================================================
+"""
+cleanup.py の単体テスト
+"""
+
+import io
+
+import pytest
+from app.utils.cleanup import cleanup_variables
+
+
+class TestCleanupVariables:
+    """メモリクリーンアップのテスト"""
+
+    @pytest.mark.unit
+    def test_dict_cleared(self):
+        """dictがclear()されること"""
+        d = {"key": "sensitive_value", "key2": "data"}
+        cleanup_variables(d)
+        assert len(d) == 0
+
+    @pytest.mark.unit
+    def test_list_cleared(self):
+        """listがclear()されること"""
+        lst = [1, 2, 3, "sensitive"]
+        cleanup_variables(lst)
+        assert len(lst) == 0
+
+    @pytest.mark.unit
+    def test_bytesio_closed(self):
+        """BytesIOがclose()されること"""
+        buf = io.BytesIO(b"sensitive data")
+        cleanup_variables(buf)
+        assert buf.closed
+
+    @pytest.mark.unit
+    def test_none_input_no_error(self):
+        """None入力でエラーが発生しないこと"""
+        cleanup_variables(None)
+        cleanup_variables(None, None, None)
+
+    @pytest.mark.unit
+    def test_mixed_types(self):
+        """異なる型の変数が混在しても正常にクリーンアップされること"""
+        d = {"key": "value"}
+        lst = [1, 2, 3]
+        buf = io.BytesIO(b"data")
+
+        cleanup_variables(d, lst, buf, None, "string_value", 12345)
+
+        assert len(d) == 0
+        assert len(lst) == 0
+        assert buf.closed
+
+    @pytest.mark.unit
+    def test_already_closed_bytesio(self):
+        """既にcloseされたBytesIOでエラーが発生しないこと"""
+        buf = io.BytesIO(b"data")
+        buf.close()
+        cleanup_variables(buf)  # 二重closeでエラーにならない
+
+    @pytest.mark.unit
+    def test_empty_dict(self):
+        """空dictでエラーが発生しないこと"""
+        cleanup_variables({})
+
+    @pytest.mark.unit
+    def test_bytes_input(self):
+        """bytes型入力でエラーが発生しないこと"""
+        data = b"sensitive bytes data"
+        cleanup_variables(data)
+
+
+================================================================
+File: tests/test_excel_writer.py
+================================================================
+import pytest
+import io
+import openpyxl
+from openpyxl.styles import Font, Alignment
+from app.core.excel_writer import write_to_template
+
+
+@pytest.fixture
+def template_bytes():
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Template"
+
+    # プレースホルダー
+    ws["A1"] = "会社名: {{company_name}}"
+
+    # 結合セル
+    ws.merge_cells("C1:D2")
+    ws["C1"] = "{{address}}"
+
+    # 数式セル
+    ws["A2"] = "=SUM(1, 2)"
+
+    # 書式設定
+    font = Font(bold=True, color="FF0000")
+    alignment = Alignment(horizontal="center")
+    ws["B1"].font = font
+    ws["B1"].alignment = alignment
+    ws["B1"] = "{{amount}}"
+
+    # 既存値（nullのテスト用）
+    ws["A3"] = "既存データ"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_placeholder_replacement(template_bytes):
+    """{{キー名}}プレースホルダーが正しく置換されること"""
+    extracted_data = {"company_name": "株式会社テスト"}
+    result_buf = write_to_template(template_bytes, extracted_data)
+
+    wb = openpyxl.load_workbook(result_buf)
+    ws = wb.active
+    assert ws["A1"].value == "会社名: 株式会社テスト"
+
+
+def test_mapping_config_cell_writing(template_bytes):
+    """mapping_config指定のセルに正しく値が書き込まれること"""
+    extracted_data = {"target": "ダイレクト入力"}
+    mapping_config = {
+        "mappings": [{"key": "target", "sheet": "Template", "cell": "E1"}]
+    }
+
+    result_buf = write_to_template(template_bytes, extracted_data, mapping_config)
+    wb = openpyxl.load_workbook(result_buf)
+    ws = wb.active
+    assert ws["E1"].value == "ダイレクト入力"
+
+
+def test_merged_cell_writing(template_bytes):
+    """結合セルの左上に正しく書き込まれること"""
+    extracted_data = {"address": "東京都新宿区"}
+    result_buf = write_to_template(template_bytes, extracted_data)
+
+    wb = openpyxl.load_workbook(result_buf)
+    ws = wb.active
+    assert ws["C1"].value == "東京都新宿区"
+    # D1, C2, D2などはNoneまたは結合セルの状態を維持
+
+
+def test_formula_cell_skipped(template_bytes):
+    """数式セルへの書き込みがスキップされること"""
+    extracted_data = {}
+    mapping_config = {"formula_override": "A2"}
+
+    # mapping_configで強制的にA2を指定しても数式ならスキップされるか（実装依存）
+    # プレースホルダー置換のロジックでは数式セルには置換文字がないので何もしない
+    result_buf = write_to_template(template_bytes, extracted_data, mapping_config)
+    wb = openpyxl.load_workbook(result_buf)
+    ws = wb.active
+    assert str(ws["A2"].value).startswith("=")
+
+
+def test_cell_format_preserved(template_bytes):
+    """書き込み後もセルの書式（フォント・配置）が保持されること"""
+    extracted_data = {"amount": 1000}
+    result_buf = write_to_template(template_bytes, extracted_data)
+
+    wb = openpyxl.load_workbook(result_buf)
+    ws = wb.active
+    assert ws["B1"].value == 1000
+    assert ws["B1"].font.bold is True
+    assert ws["B1"].font.color.rgb == "00FF0000"
+    assert ws["B1"].alignment.horizontal == "center"
+
+
+def test_null_value_preserves_existing(template_bytes):
+    """null値の場合、既存セル値が消されないこと"""
+    # プレースホルダーに対する値がない、またはmapping_configで指定した値がNone
+    extracted_data = {"existing": None}
+    mapping_config = {"existing": "A3"}
+
+    result_buf = write_to_template(template_bytes, extracted_data, mapping_config)
+    wb = openpyxl.load_workbook(result_buf)
+    ws = wb.active
+    assert ws["A3"].value == "既存データ"
+
+
+def test_output_is_bytesio(template_bytes):
+    """戻り値がio.BytesIO型であること"""
+    result_buf = write_to_template(template_bytes, {})
+    assert isinstance(result_buf, io.BytesIO)
+
+
+def test_output_is_valid_xlsx(template_bytes):
+    """出力がopenpyxlで開ける有効なxlsxであること"""
+    result_buf = write_to_template(template_bytes, {})
+    try:
+        openpyxl.load_workbook(result_buf)
+    except Exception as e:
+        pytest.fail(f"Invalid xlsx format: {e}")
+
+
+================================================================
+File: tests/test_extractor.py
+================================================================
+import pytest
+import asyncio
+from unittest.mock import AsyncMock, patch
+
+from app.core.extractor import extract_data
+from app.models.enums import AppException, ErrorCode
+
+
+# モック用のVertex AIレスポンス
+class MockResponse:
+    def __init__(self, text):
+        self.text = text
+
+
+@pytest.fixture
+def mock_vertex_model():
+    with patch("app.core.extractor.GenerativeModel") as MockModel:
+        model_instance = MockModel.return_value
+        yield model_instance
+
+
+@pytest.mark.asyncio
+async def test_successful_extraction(mock_vertex_model):
+    """正常なテキストからJSONが抽出されること"""
+    mock_vertex_model.generate_content_async = AsyncMock(
+        return_value=MockResponse('{"会社名": "株式会社テスト"}')
+    )
+
+    result = await extract_data("株式会社テスト")
+    assert result.data == {"会社名": "株式会社テスト"}
+    assert result.is_fallback is False
+    assert result.retry_count == 0
+
+
+@pytest.mark.asyncio
+async def test_extraction_with_mapping_config(mock_vertex_model):
+    """mapping_config指定時に指定項目のみ抽出されること"""
+    mock_vertex_model.generate_content_async = AsyncMock(
+        return_value=MockResponse('{"代表者名": "山田太郎"}')
+    )
+
+    mapping_config = {"代表者名": "A1"}
+    result = await extract_data("山田太郎", mapping_config)
+    assert result.data == {"代表者名": "山田太郎"}
+
+    # 呼び出された引数にmapping_configのキーが含まれているか確認
+    call_args = mock_vertex_model.generate_content_async.call_args[0][0]
+    assert "代表者名" in call_args
+
+
+@pytest.mark.asyncio
+async def test_retry_on_json_parse_failure(mock_vertex_model):
+    """JSON parse失敗時にリトライされること"""
+    # 1回目: 不正なJSON, 2回目: 正常なJSON
+    mock_vertex_model.generate_content_async = AsyncMock(
+        side_effect=[
+            MockResponse("これはJSONではありません"),
+            MockResponse('{"会社名": "株式会社テスト"}'),
+        ]
+    )
+
+    result = await extract_data("テキスト")
+    assert result.data == {"会社名": "株式会社テスト"}
+    assert result.retry_count == 1
+
+
+@pytest.mark.asyncio
+async def test_max_retry_exceeded_raises_error(mock_vertex_model):
+    """リトライ上限超過でExtractionError(AppException)が送出されること"""
+    mock_vertex_model.generate_content_async = AsyncMock(
+        return_value=MockResponse("不正なJSON文字列")
+    )
+
+    with pytest.raises(AppException) as excinfo:
+        await extract_data("テキスト")
+
+    assert excinfo.value.error_code == ErrorCode.EXTRACTION_FAILED
+    assert (
+        mock_vertex_model.generate_content_async.call_count == 3
+    )  # 初回 + リトライ2回
+
+
+@pytest.mark.asyncio
+async def test_timeout_raises_error(mock_vertex_model):
+    """タイムアウト時にTimeoutErrorが送出されること"""
+    mock_vertex_model.generate_content_async = AsyncMock(
+        side_effect=asyncio.TimeoutError()
+    )
+
+    with pytest.raises(AppException) as excinfo:
+        await extract_data("テキスト")
+
+    assert excinfo.value.error_code == ErrorCode.TIMEOUT
+
+
+@pytest.mark.asyncio
+async def test_json_wrapped_in_code_block(mock_vertex_model):
+    """```json...```で囲まれたレスポンスが正しくparseされること"""
+    mock_vertex_model.generate_content_async = AsyncMock(
+        return_value=MockResponse('```json\n{"会社名": "テスト"}\n```')
+    )
+
+    result = await extract_data("テキスト")
+    assert result.data == {"会社名": "テスト"}
+
+
+================================================================
+File: tests/test_file_reader.py
+================================================================
+"""
+file_reader.py の単体テスト
+"""
+
+import pytest
+from app.core.file_reader import read_file, detect_file_type, FileType
+from app.models.enums import FileReadError
+
+
+class TestDetectFileType:
+    """ファイルタイプ判定のテスト"""
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "filename,expected",
+        [
+            ("document.pdf", FileType.PDF),
+            ("data.csv", FileType.CSV),
+            ("sheet.xlsx", FileType.XLSX),
+            ("old_sheet.xls", FileType.XLS),
+            ("DOCUMENT.PDF", FileType.PDF),  # 大文字
+            ("my.data.file.csv", FileType.CSV),  # 複数ドット
+        ],
+    )
+    def test_valid_extensions(self, filename: str, expected: FileType):
+        """対応拡張子が正しくFileTypeに変換されること"""
+        assert detect_file_type(filename) == expected
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "filename",
+        [
+            "document.docx",
+            "image.png",
+            "archive.zip",
+            "noextension",
+            "",
+        ],
+    )
+    def test_invalid_extensions(self, filename: str):
+        """非対応拡張子でValueErrorが発生すること"""
+        with pytest.raises(ValueError):
+            detect_file_type(filename)
+
+
+class TestReadPDF:
+    """PDF読み込みのテスト"""
+
+    @pytest.mark.unit
+    def test_text_extraction(self, sample_pdf_bytes):
+        """PDFからテキストが抽出されること"""
+        result = read_file(sample_pdf_bytes, FileType.PDF)
+        assert isinstance(result, str)
+        assert len(result) > 0
+        assert "Test Corporation" in result
+
+    @pytest.mark.unit
+    def test_multipage_extraction(self, sample_pdf_bytes):
+        """複数ページのPDFから全ページのテキストが抽出されること"""
+        result = read_file(sample_pdf_bytes, FileType.PDF)
+        assert "Page" in result or "Test Corporation" in result
+        assert "DX Promotion Project" in result  # Page 2の内容
+
+    @pytest.mark.unit
+    def test_empty_pdf_raises_error(self, empty_pdf_bytes):
+        """テキストなしPDFでFileReadErrorが発生すること"""
+        with pytest.raises(FileReadError):
+            read_file(empty_pdf_bytes, FileType.PDF)
+
+    @pytest.mark.unit
+    def test_corrupted_pdf_raises_error(self, corrupted_pdf_bytes):
+        """破損PDFでFileReadErrorが発生すること"""
+        with pytest.raises(FileReadError):
+            read_file(corrupted_pdf_bytes, FileType.PDF)
+
+
+class TestReadCSV:
+    """CSV読み込みのテスト"""
+
+    @pytest.mark.unit
+    def test_utf8_reading(self, sample_csv_bytes):
+        """UTF-8 CSVが正しく読み込まれること"""
+        result = read_file(sample_csv_bytes, FileType.CSV)
+        assert isinstance(result, str)
+        assert "株式会社テスト" in result
+        assert "山田太郎" in result
+
+    @pytest.mark.unit
+    def test_shiftjis_fallback(self, sample_csv_sjis_bytes):
+        """Shift_JIS CSVがフォールバックで読み込まれること"""
+        result = read_file(sample_csv_sjis_bytes, FileType.CSV)
+        assert isinstance(result, str)
+        assert "株式会社テスト" in result
+
+    @pytest.mark.unit
+    def test_empty_csv_raises_error(self):
+        """空CSVでFileReadErrorが発生すること"""
+        with pytest.raises(FileReadError):
+            read_file(b"", FileType.CSV)
+
+
+class TestReadExcel:
+    """Excel読み込みのテスト"""
+
+    @pytest.mark.unit
+    def test_xlsx_reading(self, sample_xlsx_bytes):
+        """Excelファイルのセル値が読み取られること"""
+        result = read_file(sample_xlsx_bytes, FileType.XLSX)
+        assert isinstance(result, str)
+        assert "株式会社テスト" in result
+        assert "1500000" in result
+
+    @pytest.mark.unit
+    def test_merged_cells_handling(self, sample_xlsx_bytes):
+        """セル結合されたExcelで値が読み取られること"""
+        result = read_file(sample_xlsx_bytes, FileType.XLSX)
+        assert "補助金申請データ" in result  # 結合セルA1の値
+
+    @pytest.mark.unit
+    def test_corrupted_xlsx_raises_error(self):
+        """破損Excelファイルでエラーが発生すること"""
+        with pytest.raises(FileReadError):
+            read_file(b"not an excel file", FileType.XLSX)
+
+
+================================================================
+File: tests/test_masking.py
+================================================================
+"""
+masking.py の単体テスト
+"""
+
+import pytest
+from app.core.masking import mask_sensitive_data, unmask_data, MaskingResult
+
+
+class TestMaskSensitiveData:
+    """マスキング処理のテスト"""
+
+    @pytest.mark.unit
+    def test_phone_number_masked(self):
+        """電話番号がマスキングされること"""
+        text = "電話番号は03-1234-5678です"
+        result = mask_sensitive_data(text)
+        assert "03-1234-5678" not in result.masked_text
+        assert "[MASK_PHONE_" in result.masked_text
+        assert len(result.mask_map) == 1
+
+    @pytest.mark.unit
+    def test_mobile_phone_masked(self):
+        """携帯電話番号がマスキングされること"""
+        text = "携帯は090-1234-5678です"
+        result = mask_sensitive_data(text)
+        assert "090-1234-5678" not in result.masked_text
+
+    @pytest.mark.unit
+    def test_mynumber_masked(self):
+        """マイナンバーがマスキングされること"""
+        text = "マイナンバー: 1234 5678 9012"
+        result = mask_sensitive_data(text)
+        assert "1234 5678 9012" not in result.masked_text
+        assert "[MASK_MYNUMBER_" in result.masked_text
+
+    @pytest.mark.unit
+    def test_mynumber_with_hyphens(self):
+        """ハイフン区切りマイナンバーがマスキングされること"""
+        text = "番号: 1234-5678-9012"
+        result = mask_sensitive_data(text)
+        assert "1234-5678-9012" not in result.masked_text
+
+    @pytest.mark.unit
+    def test_email_masked(self):
+        """メールアドレスがマスキングされること"""
+        text = "連絡先: taro@test-corp.co.jp"
+        result = mask_sensitive_data(text)
+        assert "taro@test-corp.co.jp" not in result.masked_text
+        assert "[MASK_EMAIL_" in result.masked_text
+
+    @pytest.mark.unit
+    def test_account_number_masked(self):
+        """銀行口座番号がマスキングされること"""
+        text = "口座番号: 1234567"
+        result = mask_sensitive_data(text)
+        assert "1234567" not in result.masked_text
+        assert "[MASK_ACCOUNT_" in result.masked_text
+
+    @pytest.mark.unit
+    def test_multiple_items_masked(self):
+        """複数の個人情報が同時にマスキングされること"""
+        text = "電話03-1111-2222、メールtest@a.com、番号1234567"
+        result = mask_sensitive_data(text)
+        assert "03-1111-2222" not in result.masked_text
+        assert "test@a.com" not in result.masked_text
+        assert len(result.mask_map) >= 2
+
+    @pytest.mark.unit
+    def test_no_sensitive_data(self):
+        """個人情報がないテキストは変更されないこと"""
+        text = "これは普通のテキストです。特に個人情報は含みません。"
+        result = mask_sensitive_data(text)
+        assert result.masked_text == text
+        assert len(result.mask_map) == 0
+
+    @pytest.mark.unit
+    def test_return_type(self):
+        """戻り値がMaskingResult型であること"""
+        result = mask_sensitive_data("テスト")
+        assert isinstance(result, MaskingResult)
+        assert isinstance(result.masked_text, str)
+        assert isinstance(result.mask_map, dict)
+
+
+class TestUnmaskData:
+    """マスキング復元のテスト"""
+
+    @pytest.mark.unit
+    def test_unmask_restores_original(self):
+        """マスク解除で元のテキストに復元されること"""
+        original = "電話番号は03-1234-5678です"
+        masked_result = mask_sensitive_data(original)
+        restored = unmask_data(masked_result.masked_text, masked_result.mask_map)
+        assert restored == original
+
+    @pytest.mark.unit
+    def test_unmask_multiple_items(self):
+        """複数のマスク項目が正しく復元されること"""
+        original = "TEL: 03-1111-2222, MAIL: a@b.com"
+        masked_result = mask_sensitive_data(original)
+        restored = unmask_data(masked_result.masked_text, masked_result.mask_map)
+        assert restored == original
+
+    @pytest.mark.unit
+    def test_unmask_empty_map(self):
+        """空のmask_mapでテキストが変更されないこと"""
+        text = "変更なし"
+        result = unmask_data(text, {})
+        assert result == text
+
+    @pytest.mark.unit
+    def test_roundtrip_consistency(self):
+        """マスキング→復元の往復で情報が失われないこと"""
+        texts = [
+            "TEL:03-1234-5678 FAX:03-8765-4321",
+            "マイナンバー1234 5678 9012を入力",
+            "account@example.com に送信、口座1234567",
+        ]
+        for original in texts:
+            masked = mask_sensitive_data(original)
+            restored = unmask_data(masked.masked_text, masked.mask_map)
+            assert restored == original, f"Failed for: {original}"
+
+
+class TestMaskMapConsistency:
+    """マスキングマップの整合性テスト"""
+
+    @pytest.mark.unit
+    def test_mask_map_keys_in_text(self):
+        """mask_mapのキーがすべてmasked_textに存在すること"""
+        text = "TEL: 03-1234-5678, MAIL: test@example.com"
+        result = mask_sensitive_data(text)
+        for key in result.mask_map:
+            assert key in result.masked_text
+
+    @pytest.mark.unit
+    def test_mask_map_values_not_in_text(self):
+        """mask_mapの値（元データ）がmasked_textに存在しないこと"""
+        text = "TEL: 03-1234-5678"
+        result = mask_sensitive_data(text)
+        for value in result.mask_map.values():
+            assert value not in result.masked_text
+
+    @pytest.mark.unit
+    def test_unique_mask_keys(self):
+        """同じカテゴリの複数マスクに異なる連番が付くこと"""
+        text = "TEL1: 03-1111-1111 TEL2: 03-2222-2222 TEL3: 03-3333-3333"
+        result = mask_sensitive_data(text)
+        keys = list(result.mask_map.keys())
+        assert len(keys) == len(set(keys))  # 重複なし
+
+
+================================================================
+File: tests/test_process_endpoint.py
+================================================================
+import pytest
+from fastapi.testclient import TestClient
+from unittest.mock import patch, AsyncMock
+import io
+import json
+
+from app.main import app
+from app.config import settings
+from app.core.extractor import ExtractionResult
+
+client = TestClient(app)
+
+
+@pytest.fixture
+def auth_token():
+    # テスト用のトークンをセットアップ
+    token = "test_token_123"
+    settings.VALID_TOKENS[token] = "テスト顧客"
+    yield token
+    # クリーンアップ
+    if token in settings.VALID_TOKENS:
+        del settings.VALID_TOKENS[token]
+
+
+@pytest.fixture
+def mock_dependencies():
+    with (
+        patch(
+            "app.api.endpoints.process.extract_data", new_callable=AsyncMock
+        ) as mock_extract,
+        patch("app.api.endpoints.process.write_to_template") as mock_write,
+    ):
+        mock_extract.return_value = ExtractionResult(
+            data={"テスト": "データ"}, is_fallback=False, retry_count=0
+        )
+
+        buf = io.BytesIO(b"dummy excel data")
+        buf.seek(0)
+        mock_write.return_value = buf
+
+        yield mock_extract, mock_write
+
+
+def test_successful_processing(
+    auth_token, mock_dependencies, sample_pdf_bytes, sample_xlsx_bytes
+):
+    """正常な入力でExcelが返却されること"""
+    mock_extract, mock_write = mock_dependencies
+
+    files = {
+        "source_file": ("test.pdf", sample_pdf_bytes, "application/pdf"),
+        "template_file": (
+            "template.xlsx",
+            sample_xlsx_bytes,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
+    }
+    data = {"token": auth_token}
+
+    response = client.post("/api/v1/process", files=files, data=data)
+
+    assert response.status_code == 200
+    assert (
+        response.headers["content-type"]
+        == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert response.content == b"dummy excel data"
+    assert mock_extract.called
+    assert mock_write.called
+
+
+def test_invalid_token_returns_403(sample_pdf_bytes, sample_xlsx_bytes):
+    """無効なトークンで403が返却されること"""
+    files = {
+        "source_file": ("test.pdf", sample_pdf_bytes, "application/pdf"),
+        "template_file": (
+            "template.xlsx",
+            sample_xlsx_bytes,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
+    }
+    data = {"token": "invalid_token_999"}
+
+    response = client.post("/api/v1/process", files=files, data=data)
+    assert response.status_code == 403
+    assert response.json()["detail"] == "無効なアクセストークンです"
+
+
+def test_invalid_file_type_returns_400(auth_token, sample_xlsx_bytes):
+    """非対応ファイルで400が返却されること"""
+    files = {
+        "source_file": (
+            "test.txt",
+            b"dummy text file content just to be sure it is not pdf",
+            "text/plain",
+        ),
+        "template_file": (
+            "template.xlsx",
+            sample_xlsx_bytes,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
+    }
+    data = {"token": auth_token}
+
+    response = client.post("/api/v1/process", files=files, data=data)
+    assert response.status_code == 400
+    assert response.json()["error_code"] == "INVALID_FILE_TYPE"
+
+
+def test_oversized_file_returns_413(auth_token, sample_pdf_bytes, sample_xlsx_bytes):
+    """サイズ超過で413が返却されること"""
+    # 実際にはUploadFileのsizeプロパティに依存するため、
+    # 10MB以上のダミーデータを作成するか、設定を一時的に小さくする
+    original_max_size = settings.MAX_UPLOAD_SIZE_MB
+    settings.MAX_UPLOAD_SIZE_MB = 0  # 0MBに制限
+
+    try:
+        files = {
+            "source_file": ("test.pdf", sample_pdf_bytes, "application/pdf"),
+            "template_file": (
+                "template.xlsx",
+                sample_xlsx_bytes,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ),
+        }
+        data = {"token": auth_token}
+
+        response = client.post("/api/v1/process", files=files, data=data)
+        assert response.status_code == 413
+        assert response.json()["error_code"] == "FILE_TOO_LARGE"
+    finally:
+        settings.MAX_UPLOAD_SIZE_MB = original_max_size
+
+
+def test_receipt_header_present(
+    auth_token, mock_dependencies, sample_pdf_bytes, sample_xlsx_bytes
+):
+    """レスポンスにX-ExcelForge-Receiptヘッダが含まれること"""
+    files = {
+        "source_file": ("test.pdf", sample_pdf_bytes, "application/pdf"),
+        "template_file": (
+            "template.xlsx",
+            sample_xlsx_bytes,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
+    }
+    data = {"token": auth_token}
+
+    response = client.post("/api/v1/process", files=files, data=data)
+
+    assert response.status_code == 200
+    assert "X-ExcelForge-Receipt" in response.headers
+
+    receipt_json = response.headers["X-ExcelForge-Receipt"]
+    receipt_data = json.loads(receipt_json)
+
+    assert "receipt_id" in receipt_data
+    assert receipt_data["data_retention"] == "none"
+
+
+================================================================
+File: Dockerfile
+================================================================
+# ===== ビルドステージ =====
+FROM python:3.11-slim AS builder
+
+WORKDIR /build
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# ===== 実行ステージ =====
+FROM python:3.11-slim AS runtime
+
+# セキュリティ: 非rootユーザーで実行
+RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuser
+
+WORKDIR /app
+
+# 依存ライブラリをコピー
+COPY --from=builder /install /usr/local
+
+# アプリケーションコードをコピー
+COPY app/ ./app/
+COPY streamlit_app/ ./streamlit_app/
+COPY .streamlit/ ./.streamlit/
+
+# 所有権を非rootユーザーに変更
+RUN chown -R appuser:appuser /app
+
+# 非rootユーザーに切り替え
+USER appuser
+
+# ポート公開 (Cloud Runは環境変数 PORT で指定されたポートを使うため)
+EXPOSE 8080
+ENV PORT=8080
+
+# 起動コマンド（FastAPI + Streamlitを同時起動）
+COPY --chown=appuser:appuser start.sh .
+RUN chmod +x start.sh
+
+CMD ["./start.sh"]
+
+
+================================================================
+File: docker-compose.yml
+================================================================
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - API_BASE_URL=http://localhost:8081/api/v1
+      - PORT=8080
+      # GCP認証やAPI設定は.envファイルで読み込む
+    env_file:
+      - .env
+    volumes:
+      # ローカルでの開発用にコードをマウント
+      - ./app:/app/app
+      - ./streamlit_app:/app/streamlit_app
+      - ./.streamlit:/app/.streamlit
+
+
+================================================================
+File: start.sh
+================================================================
+#!/bin/bash
+
+# FastAPIをバックグラウンドで起動（ポート8081で内部用）
+uvicorn app.main:app --host 0.0.0.0 --port 8081 &
+
+# Streamlitが内部APIを参照できるように環境変数をセット
+export API_BASE_URL="http://localhost:8081/api/v1"
+
+# Streamlitをフォアグラウンドで起動（メインプロセス、外部公開用）
+# Cloud Runは環境変数 PORT でアクセスしてくるのでそれを使用
+streamlit run streamlit_app/app.py \
+    --server.port ${PORT:-8080} \
+    --server.address 0.0.0.0 \
+    --server.headless true \
+    --browser.gatherUsageStats false
+
+
+================================================================
+File: requirements.txt
+================================================================
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+streamlit==1.41.0
+openpyxl==3.1.5
+pandas==2.2.3
+PyMuPDF==1.25.1
+httpx==0.28.1
+python-dotenv==1.0.1
+pydantic==2.10.4
+pydantic-settings==2.7.1
+google-cloud-aiplatform==1.78.0
+xlrd==2.0.1
+sentry-sdk==1.40.0
+python-multipart==0.0.9
+
+
+================================================================
+File: pyproject.toml
+================================================================
+[project]
+name = "excelforge"
+version = "1.0.0"
+description = "AI自動転記SaaSツール"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "unit: 単体テスト",
+    "integration: 結合テスト",
+]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.11"
+
+

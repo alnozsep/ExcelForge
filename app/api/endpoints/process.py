@@ -14,7 +14,7 @@ from fastapi import APIRouter, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 
 from app.api.middleware.token_auth import verify_token
-from app.core.file_reader import read_file, detect_file_type
+from app.core.file_reader import read_file, detect_file_type, FileType
 from app.core.extractor import extract_data
 from app.core.excel_writer import write_to_template
 from app.core.masking import mask_sensitive_data, unmask_data
@@ -77,6 +77,7 @@ async def process_files(
     extracted_data = None
     unmasked_data = None
     output_buffer = None
+    template_text = None
     receipt = None
 
     try:
@@ -113,10 +114,16 @@ async def process_files(
         # Step 9: マスキング（個人情報保護: Gemini APIに送る前に必ず通す）
         masking_result = mask_sensitive_data(source_text)
 
-        # Step 10: AI抽出（マスキング済みテキストを送信）
+        # Step 10: AI抽出
         parsed_mapping = json.loads(mapping_config) if mapping_config else None
+        
+        template_text = None
+        if not parsed_mapping:
+            # マッピング指定がない場合、テンプレートの構造をAIに読み取らせる（自動マッピング）
+            template_text = read_file(template_bytes, FileType.XLSX)
+
         extraction_result = await extract_data(
-            masking_result.masked_text, parsed_mapping
+            masking_result.masked_text, parsed_mapping, template_text
         )
         extracted_data = extraction_result.data
 
@@ -169,6 +176,7 @@ async def process_files(
             masking_result,
             extracted_data,
             unmasked_data,
+            template_text,
             receipt,
         )
         gc.collect()

@@ -99,7 +99,7 @@ async def extract_data(
     """
     Gemini APIを呼び出してデータ抽出を実行する。
     """
-    model = GenerativeModel("gemini-1.5-pro-preview-0409")
+    model = GenerativeModel(settings.GEMINI_MODEL)
     config = GenerationConfig(temperature=0.0)
 
     base_prompt = build_extraction_prompt(source_text, mapping_config)

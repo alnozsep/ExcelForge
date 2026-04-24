@@ -7,6 +7,7 @@ app/utils/receipt_generator.py
 import uuid
 from datetime import datetime, timezone
 from app.models.schemas import ProcessingReceipt
+from app.config import settings
 
 
 def generate_receipt(
@@ -27,7 +28,7 @@ def generate_receipt(
         source_file_type=source_type,
         source_file_size_bytes=source_size,
         processing_time_seconds=processing_time,
-        gemini_model_used="gemini-1.5-pro-preview-0409",
+        gemini_model_used=settings.GEMINI_MODEL,
         data_retention="none",
         storage_used="none",
         database_used="none",

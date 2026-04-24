@@ -158,10 +158,26 @@ def read_file(file_bytes: bytes, file_type: FileType) -> str:
                 max_row = min(max_row, 100)
                 max_col = min(max_col, 26) # A-Z
 
+                # 結合セルの範囲を把握
+                merged_ranges = ws.merged_cells.ranges
+
                 text_parts.append(f"Sheet: {sheet_name}")
                 for row in ws.iter_rows(min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col):
                     for cell in row:
-                        val = cell.value if cell.value is not None else "(empty)"
+                        # 結合セルかどうか判定
+                        is_merged = False
+                        master_coord = None
+                        for m_range in merged_ranges:
+                            if cell.coordinate in m_range:
+                                is_merged = True
+                                master_coord = openpyxl.utils.get_column_letter(m_range.min_col) + str(m_range.min_row)
+                                break
+                        
+                        if is_merged and cell.coordinate != master_coord:
+                            val = f"(part of merged cell {master_coord})"
+                        else:
+                            val = cell.value if cell.value is not None else "(empty)"
+                        
                         text_parts.append(f"{cell.coordinate}: {val}")
 
             text = "\n".join(text_parts)

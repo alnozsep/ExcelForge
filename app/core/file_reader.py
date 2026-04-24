@@ -150,13 +150,19 @@ def read_file(file_bytes: bytes, file_type: FileType) -> str:
             text_parts = []
             for sheet_name in wb.sheetnames:
                 ws = wb[sheet_name]
-                for row in ws.iter_rows():
+                # 有効なデータ範囲を取得
+                min_row, max_row = ws.min_row, ws.max_row
+                min_col, max_col = ws.min_column, ws.max_column
+                
+                # 範囲が広すぎる場合の制限（最大100行100列程度）
+                max_row = min(max_row, 100)
+                max_col = min(max_col, 26) # A-Z
+
+                text_parts.append(f"Sheet: {sheet_name}")
+                for row in ws.iter_rows(min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col):
                     for cell in row:
-                        if cell.value is not None:
-                            # 結合セルの場合、左上のセルのみ値を持つ
-                            text_parts.append(
-                                f"{sheet_name}:{cell.coordinate}={cell.value}"
-                            )
+                        val = cell.value if cell.value is not None else "(empty)"
+                        text_parts.append(f"{cell.coordinate}: {val}")
 
             text = "\n".join(text_parts)
             validate_text_size(text, "xlsx")
@@ -172,14 +178,19 @@ def read_file(file_bytes: bytes, file_type: FileType) -> str:
 
             text_parts = []
             for sheet in wb.sheets():
-                for rowx in range(sheet.nrows):
-                    for colx in range(sheet.ncols):
+                text_parts.append(f"Sheet: {sheet.name}")
+                # XLSも100x26に制限
+                nrows = min(sheet.nrows, 100)
+                ncols = min(sheet.ncols, 26)
+                
+                for rowx in range(nrows):
+                    for colx in range(ncols):
                         cell_value = sheet.cell_value(rowx, colx)
-                        if cell_value != "":
-                            # coordinateをA1形式に変換
-                            col_letter = xlrd.colname(colx)
-                            coord = f"{col_letter}{rowx + 1}"
-                            text_parts.append(f"{sheet.name}:{coord}={cell_value}")
+                        val = cell_value if cell_value != "" else "(empty)"
+                        # coordinateをA1形式に変換
+                        col_letter = xlrd.colname(colx)
+                        coord = f"{col_letter}{rowx + 1}"
+                        text_parts.append(f"{coord}: {val}")
 
             text = "\n".join(text_parts)
             validate_text_size(text, "xls")

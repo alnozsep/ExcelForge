@@ -149,8 +149,15 @@ async def process_files(
 
         # Step 14: レスポンス返却
         output_buffer.seek(0)
+        
+        def iter_and_close(buf):
+            try:
+                yield from buf
+            finally:
+                buf.close()
+                
         return StreamingResponse(
-            output_buffer,
+            iter_and_close(output_buffer),
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={
                 "Content-Disposition": f'attachment; filename="excelforge_output.xlsx"',
@@ -160,9 +167,10 @@ async def process_files(
 
     finally:
         # Step 15: 明示的クリーンアップ（メモリ解放）
+        # output_buffer はジェネレータ内でcloseするためここから除外
         cleanup_variables(
             source_bytes, template_bytes, source_text,
             masking_result, extracted_data, unmasked_data,
-            output_buffer, receipt
+            receipt
         )
         gc.collect()

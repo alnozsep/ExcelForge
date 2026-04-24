@@ -37,8 +37,6 @@ if not settings.DEBUG and settings.SENTRY_DSN:
         environment="production",
         # 個人情報を送信しない設定
         send_default_pii=False,
-        # リクエストボディを送信しない
-        request_bodies="never",
         # ファイルアップロードの内容を除外
         before_send=_scrub_sensitive_data,
     )

@@ -29,7 +29,8 @@ router = APIRouter()
 
 def _validate_file(upload_file: UploadFile, allowed_extensions: list[str]):
     """ファイルの拡張子とサイズを検証する"""
-    ext = os.path.splitext(upload_file.filename)[1].lower()
+    filename = upload_file.filename or ""
+    ext = os.path.splitext(filename)[1].lower()
     if ext not in allowed_extensions:
         raise AppException(
             error_code=ErrorCode.INVALID_FILE_TYPE,
@@ -108,7 +109,7 @@ async def process_files(
                 status_code=413,
             )
 
-        file_type = detect_file_type(source_file.filename)
+        file_type = detect_file_type(source_file.filename or "")
         source_text = read_file(source_bytes, file_type)
 
         # Step 9: マスキング（個人情報保護: Gemini APIに送る前に必ず通す）

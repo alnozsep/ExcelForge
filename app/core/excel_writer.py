@@ -5,9 +5,9 @@ app/core/excel_writer.py
 """
 
 import io
-from typing import Optional
-import openpyxl
 import re
+from typing import Optional, Any
+import openpyxl
 
 from app.models.enums import AppException, ErrorCode
 
@@ -112,7 +112,7 @@ def write_to_template(
                             and "}}" in cell.value
                         ):
                             # セル内のすべてのプレースホルダーを置換
-                            new_value = cell.value
+                            new_value: Any = cell.value
                             matches = re.findall(r"\{\{([^}]+)\}\}", cell.value)
 
                             has_replacement = False
@@ -159,5 +159,5 @@ def write_to_template(
 
     except Exception as e:
         raise AppException(
-            ErrorCode.TEMPLATE_ERROR, f"テンプレート書き込みエラー: {str(e)}"
+            ErrorCode.TEMPLATE_WRITE_ERROR, f"テンプレート書き込みエラー: {str(e)}"
         )

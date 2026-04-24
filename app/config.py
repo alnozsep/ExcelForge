@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     PORT: int = 8080
 
     # === Gemini API ===
-    GCP_PROJECT_ID: str
+    GCP_PROJECT_ID: str = ""
     GCP_LOCATION: str = "us-central1"
     GEMINI_MODEL: str = "gemini-2.5-flash"
     GEMINI_MAX_OUTPUT_TOKENS: int = 8192

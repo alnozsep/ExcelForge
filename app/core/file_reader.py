@@ -20,7 +20,6 @@ app/core/file_reader.py
 import io
 import re
 from enum import Enum
-import pandas as pd
 import openpyxl
 import xlrd
 import fitz

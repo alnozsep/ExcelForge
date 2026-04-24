@@ -1,4 +1,3 @@
-import pytest
 import io
 import openpyxl
 from app.core.excel_writer import write_to_template

@@ -124,22 +124,18 @@ def read_file(file_bytes: bytes, file_type: FileType) -> str:
 
         elif file_type == FileType.CSV:
             try:
-                df = pd.read_csv(io.BytesIO(file_bytes), encoding="utf-8")
+                text = file_bytes.decode("utf-8")
             except UnicodeDecodeError:
                 try:
-                    df = pd.read_csv(io.BytesIO(file_bytes), encoding="shift_jis")
+                    text = file_bytes.decode("shift_jis")
                 except Exception as e:
                     raise FileReadError(
                         f"CSVファイルの読み込みに失敗しました（エンコーディングエラー）: {type(e).__name__}"
                     )
-            except pd.errors.EmptyDataError:
+            
+            if not text.strip():
                 raise FileReadError("CSVファイルが空です。")
-            except Exception as e:
-                raise FileReadError(
-                    f"CSVファイルの読み込みに失敗しました: {type(e).__name__}"
-                )
 
-            text = df.to_string(index=False)
             validate_text_size(text, "csv")
             return text
 

@@ -17,8 +17,12 @@ project_root = str(Path(__file__).resolve().parent.parent.parent)
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-from streamlit_app.components.header import render_header
-from streamlit_app.components.footer import render_footer
+try:
+    from streamlit_app.components.header import render_header
+    from streamlit_app.components.footer import render_footer
+except ImportError:
+    from components.header import render_header
+    from components.footer import render_footer
 
 st.set_page_config(page_title="アップロード - ExcelForge", page_icon="🤖")
 

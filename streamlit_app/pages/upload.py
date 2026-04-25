@@ -40,43 +40,56 @@ def main():
 
     st.markdown("### ファイルアップロード")
 
-    # フォーム開始
+    st.markdown("---")
+    st.markdown("#### ⚙ 設定")
+    
+    # 処理モードの説明
+    mode_descriptions = {
+        "AI自動判定 (Auto)": "AIがテンプレートの構造を読み取り、最適なセルを自動的に判断してデータを転記します。テンプレートに設定が不要な最も手軽なモードです。",
+        "プレースホルダーのみ (Placeholder)": "テンプレート内の `{{項目名}}` という記述のみを置換対象にします。AIにはテンプレート構造を伝えないため、意図しない場所への書き込みを完全に防げます。",
+        "マニュアル指定 (Manual)": "どの項目をどのセル（例: A1）に書き込むかをJSON形式で厳密に指定します。定型業務で転記先を固定したい場合に最適です。"
+    }
+
+    processing_mode = st.radio(
+        "処理モードを選択してください",
+        list(mode_descriptions.keys()),
+        index=0,
+        help="用途に合わせてAIの挙動を切り替えます。"
+    )
+    
+    st.info(mode_descriptions[processing_mode])
+    
+    mapping_config_input = ""
+    if processing_mode == "マニュアル指定 (Manual)":
+        mapping_config_input = st.text_area(
+            "マッピング設定 (JSON)",
+            placeholder='''{
+  "mappings": [
+    {"key": "会社名", "sheet": "Sheet1", "cell": "A1"},
+    {"key": "合計金額", "sheet": "Sheet1", "cell": "G30"}
+  ]
+}''',
+            height=200,
+            help="書き込み先のシート名とセル番地を明示的に指定してください。"
+        )
+
+    st.markdown("---")
+
+    # 変換実行ボタン（ファイル選択とボタンのみフォーム内に配置）
     with st.form("upload_form"):
-        st.markdown("#### 📄 ソースファイル")
+        st.markdown("#### 📄 ファイル選択")
         source_file = st.file_uploader(
-            "ここにファイルをドラッグ&ドロップ または クリックして選択",
+            "ソースファイル（PDF, CSV, Excel）",
             type=["pdf", "csv", "xlsx", "xls"],
             key="source_file",
         )
-        st.caption("対応形式: PDF, CSV, Excel (.xlsx/.xls) | 最大サイズ: 10MB")
-
-        st.markdown("#### 📋 Excelテンプレート")
         template_file = st.file_uploader(
-            "ここにファイルをドラッグ&ドロップ または クリックして選択",
+            "Excelテンプレート（.xlsx）",
             type=["xlsx"],
             key="template_file",
         )
-        st.caption("対応形式: Excel (.xlsx) | 最大サイズ: 10MB")
 
-        st.markdown("#### ⚙ 設定")
-        processing_mode = st.radio(
-            "処理モード",
-            ["AI自動判定 (Auto)", "プレースホルダーのみ (Placeholder)", "マニュアル指定 (Manual)"],
-            index=0,
-            help="Auto: AIがテンプレートを解析して自動で書き込みます。Placeholder: テンプレート内の {{key}} のみを置換します。Manual: JSON形式でマッピングを直接指定します。",
-        )
-        
-        mapping_config_input = ""
-        if processing_mode == "マニュアル指定 (Manual)":
-            mapping_config_input = st.text_area(
-                "マッピング設定 (JSON)",
-                placeholder='{"mappings": [{"key": "会社名", "sheet": "Sheet1", "cell": "A1"}]}',
-                height=150
-            )
-
-        st.info(
-            "⚠ アップロードされたファイルは処理後即座に削除されます。サーバーには保存されません。"
-        )
+        st.info("⚠ アップロードされたファイルは処理後即座に削除されます。")
 
         submit_btn = st.form_submit_button(
             "▶ 変換を開始する", type="primary", use_container_width=True
@@ -84,9 +97,7 @@ def main():
 
     if submit_btn:
         if not source_file or not template_file:
-            st.error(
-                "ソースファイルとテンプレートファイルの両方をアップロードしてください。"
-            )
+            st.error("ソースファイルとテンプレートファイルの両方をアップロードしてください。")
             return
 
         # モード変換

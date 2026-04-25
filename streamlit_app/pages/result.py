@@ -9,11 +9,13 @@ import json
 import sys
 from pathlib import Path
 
-# 親ディレクトリを検索パスに追加（pages/ から components/ を参照するため）
-sys.path.append(str(Path(__file__).resolve().parent.parent))
+# プロジェクトルートを検索パスに追加
+project_root = str(Path(__file__).resolve().parent.parent.parent)
+if project_root not in sys.path:
+    sys.path.append(project_root)
 
-from components.header import render_header
-from components.footer import render_footer
+from streamlit_app.components.header import render_header
+from streamlit_app.components.footer import render_footer
 
 st.set_page_config(page_title="処理結果 - ExcelForge", page_icon="✅")
 

@@ -17,8 +17,8 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-from components.header import render_header  # noqa: E402
-from components.footer import render_footer  # noqa: E402
+from streamlit_app.components.header import render_header
+from streamlit_app.components.footer import render_footer
 
 # 内部APIエンドポイント（Cloud Runの場合は環境変数等で指定可能にする）
 # デフォルトはローカル

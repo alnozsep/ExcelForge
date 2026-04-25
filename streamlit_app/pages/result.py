@@ -6,6 +6,12 @@ streamlit_app/pages/result.py
 
 import streamlit as st
 import json
+import sys
+from pathlib import Path
+
+# 親ディレクトリを検索パスに追加（pages/ から components/ を参照するため）
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
 from components.header import render_header
 from components.footer import render_footer
 

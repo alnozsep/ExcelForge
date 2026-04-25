@@ -63,6 +63,7 @@ async def process_files(
     template_file: UploadFile = File(...),
     token: str = Form(...),
     mapping_config: str = Form(None),
+    processing_mode: str = Form("auto"),
 ):
     """
     処理手順（設計書 5.1節 Step6〜Step15 に完全準拠）:
@@ -119,8 +120,8 @@ async def process_files(
         parsed_mapping = json.loads(mapping_config) if mapping_config else None
 
         template_text = None
-        if not parsed_mapping:
-            # マッピング指定がない場合、テンプレートの構造をAIに読み取らせる（自動マッピング）
+        # モードが 'auto' で、かつマニュアル指定がない場合のみテンプレート解析を行う
+        if processing_mode == "auto" and not parsed_mapping:
             template_text = read_file(template_bytes, FileType.XLSX)
 
         extraction_result = await extract_data(

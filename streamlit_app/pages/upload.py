@@ -46,6 +46,22 @@ def main():
         )
         st.caption("対応形式: Excel (.xlsx) | 最大サイズ: 10MB")
 
+        st.markdown("#### ⚙ 設定")
+        processing_mode = st.radio(
+            "処理モード",
+            ["AI自動判定 (Auto)", "プレースホルダーのみ (Placeholder)", "マニュアル指定 (Manual)"],
+            index=0,
+            help="Auto: AIがテンプレートを解析して自動で書き込みます。Placeholder: テンプレート内の {{key}} のみを置換します。Manual: JSON形式でマッピングを直接指定します。",
+        )
+        
+        mapping_config_input = ""
+        if processing_mode == "マニュアル指定 (Manual)":
+            mapping_config_input = st.text_area(
+                "マッピング設定 (JSON)",
+                placeholder='{"mappings": [{"key": "会社名", "sheet": "Sheet1", "cell": "A1"}]}',
+                height=150
+            )
+
         st.info(
             "⚠ アップロードされたファイルは処理後即座に削除されます。サーバーには保存されません。"
         )
@@ -60,6 +76,25 @@ def main():
                 "ソースファイルとテンプレートファイルの両方をアップロードしてください。"
             )
             return
+
+        # モード変換
+        mode_map = {
+            "AI自動判定 (Auto)": "auto",
+            "プレースホルダーのみ (Placeholder)": "placeholder",
+            "マニュアル指定 (Manual)": "manual"
+        }
+        api_mode = mode_map[processing_mode]
+
+        # JSONバリデーション
+        if api_mode == "manual":
+            if not mapping_config_input.strip():
+                st.error("マニュアル指定モードではJSONマッピングが必要です。")
+                return
+            try:
+                json.loads(mapping_config_input)
+            except json.JSONDecodeError:
+                st.error("入力されたマッピング設定が有効なJSONではありません。")
+                return
 
         # クライアント側バリデーション
         MAX_SIZE = 10 * 1024 * 1024
@@ -91,7 +126,11 @@ def main():
                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     ),
                 }
-                data = {"token": st.session_state.token}
+                data = {
+                    "token": st.session_state.token,
+                    "processing_mode": api_mode,
+                    "mapping_config": mapping_config_input if api_mode == "manual" else None
+                }
 
                 # APIリクエスト
                 response = httpx.post(

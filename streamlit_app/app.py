@@ -21,8 +21,8 @@ try:
     from streamlit_app.components.header import render_header
     from streamlit_app.components.footer import render_footer
 except ImportError:
-    from components.header import render_header
-    from components.footer import render_footer
+    from components.header import render_header  # type: ignore
+    from components.footer import render_footer  # type: ignore
 
 # 内部APIエンドポイント（Cloud Runの場合は環境変数等で指定可能にする）
 # デフォルトはローカル

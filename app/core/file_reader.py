@@ -123,7 +123,8 @@ def read_file(file_bytes: bytes, file_type: FileType) -> str:
 
         elif file_type == FileType.CSV:
             try:
-                text = file_bytes.decode("utf-8")
+                # BOM付きUTF-8に対応するためutf-8-sigを使用
+                text = file_bytes.decode("utf-8-sig")
             except UnicodeDecodeError:
                 try:
                     text = file_bytes.decode("shift_jis")
@@ -153,9 +154,9 @@ def read_file(file_bytes: bytes, file_type: FileType) -> str:
                 min_row, max_row = ws.min_row, ws.max_row
                 min_col, max_col = ws.min_column, ws.max_column
 
-                # 範囲が広すぎる場合の制限（最大100行100列程度）
+                # 範囲が広すぎる場合の制限（最大100行52列程度）
                 max_row = min(max_row, 100)
-                max_col = min(max_col, 26)  # A-Z
+                max_col = min(max_col, 52)  # A-AZ
 
                 # 結合セルの範囲を把握
                 merged_ranges = ws.merged_cells.ranges
@@ -168,16 +169,24 @@ def read_file(file_bytes: bytes, file_type: FileType) -> str:
                         # 結合セルかどうか判定
                         is_merged = False
                         master_coord = None
+                        m_range_str = ""
                         for m_range in merged_ranges:
                             if cell.coordinate in m_range:
                                 is_merged = True
                                 master_coord = openpyxl.utils.get_column_letter(
                                     m_range.min_col
                                 ) + str(m_range.min_row)
+                                m_range_str = m_range.coord
                                 break
 
-                        if is_merged and cell.coordinate != master_coord:
-                            val = f"(part of merged cell {master_coord})"
+                        if is_merged:
+                            if cell.coordinate != master_coord:
+                                val = f"(part of merged cell {master_coord})"
+                            else:
+                                val = (
+                                    cell.value if cell.value is not None else "(empty)"
+                                )
+                                val = f"{val} (Master of merged range {m_range_str})"
                         else:
                             val = cell.value if cell.value is not None else "(empty)"
 
@@ -198,9 +207,9 @@ def read_file(file_bytes: bytes, file_type: FileType) -> str:
             text_parts = []
             for sheet in wb.sheets():
                 text_parts.append(f"Sheet: {sheet.name}")
-                # XLSも100x26に制限
+                # XLSも100x52に制限
                 nrows = min(sheet.nrows, 100)
-                ncols = min(sheet.ncols, 26)
+                ncols = min(sheet.ncols, 52)
 
                 for rowx in range(nrows):
                     for colx in range(ncols):

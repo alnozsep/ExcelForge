@@ -154,7 +154,11 @@ async def process_files(
 
         def iter_and_close(buf):
             try:
-                yield from buf
+                while True:
+                    chunk = buf.read(8192)
+                    if not chunk:
+                        break
+                    yield chunk
             finally:
                 buf.close()
 

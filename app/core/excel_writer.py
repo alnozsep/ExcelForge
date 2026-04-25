@@ -46,13 +46,13 @@ def write_to_template(
         # メモリ上でExcelファイルを開く
         wb = openpyxl.load_workbook(io.BytesIO(template_bytes))
 
+        # 1. マッピング設定に基づく書き込み
         if mapping_config and "mappings" in mapping_config:
-            # マッピング設定に基づく書き込み
             mappings = mapping_config.get("mappings", [])
             for mapping in mappings:
                 key = mapping.get("key")
-                sheet_name = mapping.get("sheet")
-                cell_ref = mapping.get("cell")
+                sheet_name = (mapping.get("sheet") or "").strip()
+                cell_ref = (mapping.get("cell") or "").strip()
 
                 if not key or key not in extracted_data:
                     continue
@@ -64,34 +64,29 @@ def write_to_template(
                 if sheet_name in wb.sheetnames:
                     ws = wb[sheet_name]
                 else:
-                    # シートが存在しない場合は最初のアクティブシートを使用
                     ws = wb.active
 
-                target_cell = ws[cell_ref]
-
-                # 結合セルの場合はマスターセルを取得
-                if _is_merged_cell(ws, target_cell):
-                    target_cell = _get_merged_cell_master(ws, target_cell)
-
-                # 数式セルはスキップ
-                if _has_formula(target_cell):
+                try:
+                    target_cell = ws[cell_ref]
+                    if _is_merged_cell(ws, target_cell):
+                        target_cell = _get_merged_cell_master(ws, target_cell)
+                    if not _has_formula(target_cell):
+                        target_cell.value = val
+                except Exception:
                     continue
 
-                # 値を書き込み（元の書式は維持される）
-                target_cell.value = val
-
-        # 直接セル指定（Sheet:Cell形式）の書き込み
+        # 2. 直接セル指定（Sheet:Cell形式）の書き込み
         for key, val in extracted_data.items():
             if val is None or not isinstance(key, str) or ":" not in key:
                 continue
 
             parts = key.split(":")
             if len(parts) == 2:
-                sheet_name, cell_ref = parts
+                sheet_name = parts[0].strip()
+                cell_ref = parts[1].strip()
                 if sheet_name in wb.sheetnames:
                     ws = wb[sheet_name]
                     try:
-                        # セル番地が有効かチェック
                         target_cell = ws[cell_ref]
                         if _is_merged_cell(ws, target_cell):
                             target_cell = _get_merged_cell_master(ws, target_cell)
@@ -100,62 +95,59 @@ def write_to_template(
                     except Exception:
                         continue
 
-        else:
-            # mapping_configがない場合はプレースホルダー {{key}} を探して置換
-            for sheet_name in wb.sheetnames:
-                ws = wb[sheet_name]
-                for row in ws.iter_rows():
-                    for cell in row:
-                        if (
-                            isinstance(cell.value, str)
-                            and "{{" in cell.value
-                            and "}}" in cell.value
-                        ):
-                            # セル内のすべてのプレースホルダーを置換
-                            new_value: Any = cell.value
-                            matches = re.findall(r"\{\{([^}]+)\}\}", cell.value)
+        # 3. プレースホルダー {{key}} を探して置換
+        # mapping_configがない場合、または明示的に指定された場合の両方で動作させる
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            for row in ws.iter_rows():
+                for cell in row:
+                    if (
+                        isinstance(cell.value, str)
+                        and "{{" in cell.value
+                        and "}}" in cell.value
+                    ):
+                        new_value: Any = cell.value
+                        matches = re.findall(r"\{\{([^}]+)\}\}", cell.value)
 
-                            has_replacement = False
-                            for key in matches:
-                                if (
-                                    key in extracted_data
-                                    and extracted_data[key] is not None
-                                ):
-                                    # 置換
-                                    val_str = str(extracted_data[key])
-                                    new_value = new_value.replace(
-                                        f"{{{{{key}}}}}", val_str
-                                    )
-                                    has_replacement = True
-                                elif mapping_config and key in mapping_config:
-                                    # mapping_config（辞書形式）でキーの指定がある場合
-                                    # ただし、プレースホルダー方式でmapping_config(dict)を使うケースへの対応
-                                    pass
+                        has_replacement = False
+                        for key in matches:
+                            key_stripped = key.strip()
+                            if (
+                                key_stripped in extracted_data
+                                and extracted_data[key_stripped] is not None
+                            ):
+                                val = extracted_data[key_stripped]
+                                val_str = str(val)
+                                new_value = new_value.replace(f"{{{{{key}}}}}", val_str)
+                                has_replacement = True
 
-                            if has_replacement:
-                                # 元が完全に "{{key}}" のみで、置換結果が数値の場合は数値に変換
-                                if (
-                                    len(matches) == 1
-                                    and cell.value.strip() == f"{{{{{matches[0]}}}}}"
-                                ):
-                                    val = extracted_data[matches[0]]
-                                    if isinstance(val, (int, float)):
-                                        new_value = val
+                        if has_replacement:
+                            # 完全に "{{key}}" のみで置換結果が数値の場合は数値として扱う
+                            if (
+                                len(matches) == 1
+                                and cell.value.strip() == f"{{{{{matches[0]}}}}}"
+                            ):
+                                val = extracted_data[matches[0].strip()]
+                                if isinstance(val, (int, float)):
+                                    new_value = val
 
-                                # 結合セルの場合はマスターセルに書き込む
-                                if _is_merged_cell(ws, cell):
-                                    master_cell = _get_merged_cell_master(ws, cell)
-                                    if not _has_formula(master_cell):
-                                        master_cell.value = new_value
-                                else:
-                                    if not _has_formula(cell):
-                                        cell.value = new_value
+                            target_cell = cell
+                            if _is_merged_cell(ws, target_cell):
+                                target_cell = _get_merged_cell_master(ws, target_cell)
+
+                            if not _has_formula(target_cell):
+                                target_cell.value = new_value
 
         # BytesIOに保存して返す
         output = io.BytesIO()
         wb.save(output)
         output.seek(0)
         return output
+
+    except Exception as e:
+        raise AppException(
+            ErrorCode.TEMPLATE_WRITE_ERROR, f"テンプレート書き込みエラー: {str(e)}"
+        )
 
     except Exception as e:
         raise AppException(

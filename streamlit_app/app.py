@@ -32,10 +32,10 @@ except ImportError:
     from components.header import render_header  # type: ignore
     from components.footer import render_footer  # type: ignore
 
-from app.config import settings  # noqa: E402
-
 
 def main():
+    from app.config import settings  # noqa: E402
+
     render_header()
 
     # クエリパラメータからトークンを取得

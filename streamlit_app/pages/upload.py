@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 import asyncio
 
+st.set_page_config(page_title="アップロード - ExcelForge", page_icon="🤖")
+
 # プロジェクトルートを検索パスに追加
 project_root = str(Path(__file__).resolve().parent.parent.parent)
 if project_root not in sys.path:
@@ -25,14 +27,12 @@ except ImportError:
 
 from app.processing_flow import run_processing  # noqa: E402
 
-st.set_page_config(page_title="アップロード - ExcelForge", page_icon="🤖")
-
 
 def main():
     # 認証チェック
     if not st.session_state.get("is_authenticated"):
         st.error("認証されていません。トップページからアクセスしてください。")
-        st.switch_page("app.py")
+        st.switch_page("home.py")
         return
 
     render_header()

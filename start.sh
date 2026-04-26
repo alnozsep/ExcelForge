@@ -6,7 +6,7 @@ export PYTHONPATH=$PYTHONPATH:.
 
 # Streamlitをフォアグラウンドで起動
 # Cloud Runは環境変数 PORT でアクセスしてくるのでそれを使用
-streamlit run streamlit_app/app.py \
+streamlit run streamlit_app/home.py \
     --server.port ${PORT:-8080} \
     --server.address 0.0.0.0 \
     --server.headless true \

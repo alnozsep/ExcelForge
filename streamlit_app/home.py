@@ -1,5 +1,5 @@
 """
-streamlit_app/app.py
+streamlit_app/home.py
 
 Streamlitアプリケーションのエントリーポイント。
 トークンの検証を行い、問題なければアップロード画面へ遷移する。
@@ -12,11 +12,6 @@ import streamlit as st
 import sys
 from pathlib import Path
 
-# プロジェクトルートを検索パスに追加
-project_root = str(Path(__file__).resolve().parent.parent)
-if project_root not in sys.path:
-    sys.path.append(project_root)
-
 # Streamlitページ設定
 st.set_page_config(
     page_title="ExcelForge",
@@ -25,6 +20,11 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
+# プロジェクトルートを検索パスに追加
+project_root = str(Path(__file__).resolve().parent.parent)
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
 try:
     from streamlit_app.components.header import render_header
     from streamlit_app.components.footer import render_footer
@@ -32,10 +32,10 @@ except ImportError:
     from components.header import render_header  # type: ignore
     from components.footer import render_footer  # type: ignore
 
+from app.config import settings  # noqa: E402
+
 
 def main():
-    from app.config import settings  # noqa: E402
-
     render_header()
 
     # クエリパラメータからトークンを取得

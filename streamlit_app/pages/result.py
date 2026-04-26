@@ -39,7 +39,7 @@ def main():
     # 認証チェック
     if not st.session_state.get("is_authenticated"):
         st.error("認証されていません。トップページからアクセスしてください。")
-        st.switch_page("app.py")
+        st.switch_page("home.py")
         return
 
     # 結果データが存在しない場合はアップロード画面に戻る

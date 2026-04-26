@@ -72,14 +72,15 @@ def test_merged_cell_writing(template_bytes):
 
 def test_formula_cell_skipped(template_bytes):
     """数式セルへの書き込みがスキップされること"""
-    extracted_data = {}
-    mapping_config = {"formula_override": "A2"}
+    extracted_data = {"formula": "上書きされるべきでない"}
+    mapping_config = {
+        "mappings": [{"key": "formula", "sheet": "Template", "cell": "A2"}]
+    }
 
-    # mapping_configで強制的にA2を指定しても数式ならスキップされるか（実装依存）
-    # プレースホルダー置換のロジックでは数式セルには置換文字がないので何もしない
     result_buf = write_to_template(template_bytes, extracted_data, mapping_config)
     wb = openpyxl.load_workbook(result_buf)
     ws = wb.active
+    # 数式セルは書き込みをスキップするため元の数式が維持されること
     assert str(ws["A2"].value).startswith("=")
 
 
@@ -100,7 +101,9 @@ def test_null_value_preserves_existing(template_bytes):
     """null値の場合、既存セル値が消されないこと"""
     # プレースホルダーに対する値がない、またはmapping_configで指定した値がNone
     extracted_data = {"existing": None}
-    mapping_config = {"existing": "A3"}
+    mapping_config = {
+        "mappings": [{"key": "existing", "sheet": "Template", "cell": "A3"}]
+    }
 
     result_buf = write_to_template(template_bytes, extracted_data, mapping_config)
     wb = openpyxl.load_workbook(result_buf)

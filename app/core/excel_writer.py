@@ -144,11 +144,8 @@ def write_to_template(
         output.seek(0)
         return output
 
-    except Exception as e:
-        raise AppException(
-            ErrorCode.TEMPLATE_WRITE_ERROR, f"テンプレート書き込みエラー: {str(e)}"
-        )
-
+    except AppException:
+        raise
     except Exception as e:
         raise AppException(
             ErrorCode.TEMPLATE_WRITE_ERROR, f"テンプレート書き込みエラー: {str(e)}"

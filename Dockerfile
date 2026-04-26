@@ -32,7 +32,7 @@ USER appuser
 EXPOSE 8080
 ENV PORT=8080
 
-# 起動コマンド（FastAPI + Streamlitを同時起動）
+# 起動コマンド（Streamlitのみ起動、処理エンジンは同一プロセス内で直接呼び出し）
 COPY --chown=appuser:appuser start.sh .
 RUN chmod +x start.sh
 

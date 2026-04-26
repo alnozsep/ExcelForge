@@ -14,9 +14,17 @@ from vertexai.generative_models import GenerativeModel, GenerationConfig
 from app.config import settings
 from app.models.enums import AppException, ErrorCode
 
-# モジュール初期化時にVertex AIを初期化
-if settings.GCP_PROJECT_ID:
-    vertexai.init(project=settings.GCP_PROJECT_ID, location=settings.GCP_LOCATION)
+# Vertex AIは初回呼び出し時に遅延初期化する（テスト容易性のため）
+_vertexai_initialized = False
+
+
+def _ensure_vertexai_initialized():
+    """初回のextract_data呼び出し時にVertex AIを初期化する"""
+    global _vertexai_initialized
+    if not _vertexai_initialized and settings.GCP_PROJECT_ID:
+        vertexai.init(project=settings.GCP_PROJECT_ID, location=settings.GCP_LOCATION)
+        _vertexai_initialized = True
+
 
 SYSTEM_PROMPT = """
 あなたはデータ抽出の専門家です。
@@ -27,8 +35,8 @@ SYSTEM_PROMPT = """
 2. 値が見つからない場合はnullとすること
 3. 日付は "YYYY-MM-DD" 形式に統一すること
 4. 金額は数値型（整数）とし、カンマや円記号を含めないこと
-5. JSONのキーは日本語とすること
-6. JSON以外のテキスト（説明文等）を出力に含めないこと
+5. JSON以外のテキスト（説明文等）を出力に含めないこと
+6. JSONのキー名は、後続の指示に従うこと（後続の指示がキー名を指定している場合は、それを優先すること）
 """
 
 
@@ -118,6 +126,9 @@ async def extract_data(
     """
     Gemini APIを呼び出してデータ抽出を実行する。
     """
+    # 初回呼び出し時にVertex AIを初期化
+    _ensure_vertexai_initialized()
+
     model = GenerativeModel(settings.GEMINI_MODEL)
     config = GenerationConfig(temperature=0.0)
 

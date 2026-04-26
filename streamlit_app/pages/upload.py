@@ -2,15 +2,14 @@
 streamlit_app/pages/upload.py
 
 アップロード画面。ファイルの検証とAPI呼び出しを行う。
+処理エンジンは同一プロセス内で直接呼び出す（FastAPIプロセスの分離不要）。
 """
 
 import streamlit as st
-import httpx
-import os
 import json
-
 import sys
 from pathlib import Path
+import asyncio
 
 # プロジェクトルートを検索パスに追加
 project_root = str(Path(__file__).resolve().parent.parent.parent)
@@ -24,9 +23,9 @@ except ImportError:
     from components.header import render_header  # type: ignore
     from components.footer import render_footer  # type: ignore
 
-st.set_page_config(page_title="アップロード - ExcelForge", page_icon="🤖")
+from app.processing_flow import run_processing  # noqa: E402
 
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8080/api/v1")
+st.set_page_config(page_title="アップロード - ExcelForge", page_icon="🤖")
 
 
 def main():
@@ -42,35 +41,30 @@ def main():
 
     st.markdown("---")
     st.markdown("#### ⚙ 設定")
-    
+
     # 処理モードの説明
     mode_descriptions = {
         "AI自動判定 (Auto)": "AIがテンプレートの構造を読み取り、最適なセルを自動的に判断してデータを転記します。テンプレートに設定が不要な最も手軽なモードです。",
         "プレースホルダーのみ (Placeholder)": "テンプレート内の `{{項目名}}` という記述のみを置換対象にします。AIにはテンプレート構造を伝えないため、意図しない場所への書き込みを完全に防げます。",
-        "マニュアル指定 (Manual)": "どの項目をどのセル（例: A1）に書き込むかをJSON形式で厳密に指定します。定型業務で転記先を固定したい場合に最適です。"
+        "マニュアル指定 (Manual)": "どの項目をどのセル（例: A1）に書き込むかをJSON形式で厳密に指定します。定型業務で転記先を固定したい場合に最適です。",
     }
 
     processing_mode = st.radio(
         "処理モードを選択してください",
         list(mode_descriptions.keys()),
         index=0,
-        help="用途に合わせてAIの挙動を切り替えます。"
+        help="用途に合わせてAIの挙動を切り替えます。",
     )
-    
+
     st.info(mode_descriptions[processing_mode])
-    
+
     mapping_config_input = ""
     if processing_mode == "マニュアル指定 (Manual)":
         mapping_config_input = st.text_area(
             "マッピング設定 (JSON)",
-            placeholder='''{
-  "mappings": [
-    {"key": "会社名", "sheet": "Sheet1", "cell": "A1"},
-    {"key": "合計金額", "sheet": "Sheet1", "cell": "G30"}
-  ]
-}''',
+            placeholder="""{\n  "mappings": [\n    {"key": "会社名", "sheet": "Sheet1", "cell": "A1"},\n    {"key": "合計金額", "sheet": "Sheet1", "cell": "G30"}\n  ]\n}""",
             height=200,
-            help="書き込み先のシート名とセル番地を明示的に指定してください。"
+            help="書き込み先のシート名とセル番地を明示的に指定してください。",
         )
 
     st.markdown("---")
@@ -97,14 +91,16 @@ def main():
 
     if submit_btn:
         if not source_file or not template_file:
-            st.error("ソースファイルとテンプレートファイルの両方をアップロードしてください。")
+            st.error(
+                "ソースファイルとテンプレートファイルの両方をアップロードしてください。"
+            )
             return
 
         # モード変換
         mode_map = {
             "AI自動判定 (Auto)": "auto",
             "プレースホルダーのみ (Placeholder)": "placeholder",
-            "マニュアル指定 (Manual)": "manual"
+            "マニュアル指定 (Manual)": "manual",
         }
         api_mode = mode_map[processing_mode]
 
@@ -130,69 +126,39 @@ def main():
 
         # 処理開始
         with st.status("処理中です...", expanded=True) as status:
-            st.write("ファイルをアップロードし、AIがデータを抽出しています...")
+            st.write("ファイルを読み込み、AIがデータを抽出しています...")
             st.write("※ 通常1〜3分程度で完了します")
 
             try:
-                # タイムアウトは長めに設定 (gemini呼び出しがあるため)
-                timeout = httpx.Timeout(180.0)
+                source_bytes = source_file.getvalue()
+                template_bytes = template_file.getvalue()
 
-                files = {
-                    "source_file": (
-                        source_file.name,
-                        source_file.getvalue(),
-                        "application/octet-stream",
-                    ),
-                    "template_file": (
-                        template_file.name,
-                        template_file.getvalue(),
-                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    ),
-                }
-                data = {
-                    "token": st.session_state.token,
-                    "processing_mode": api_mode,
-                    "mapping_config": mapping_config_input if api_mode == "manual" else None
-                }
-
-                # APIリクエスト
-                response = httpx.post(
-                    f"{API_BASE_URL}/process", data=data, files=files, timeout=timeout
-                )
-
-                if response.status_code == 200:
-                    status.update(label="変換完了", state="complete", expanded=False)
-                    # 結果をセッションステートに保存して画面遷移
-                    st.session_state.result_excel = response.content
-
-                    receipt_str = response.headers.get("X-ExcelForge-Receipt")
-                    if receipt_str:
-                        st.session_state.receipt_data = json.loads(receipt_str)
-                    else:
-                        st.session_state.receipt_data = None
-
-                    st.switch_page("pages/result.py")
-                else:
-                    status.update(
-                        label="エラーが発生しました", state="error", expanded=False
+                # 処理エンジンを直接呼び出す（asyncio.run で非同期実行）
+                output_buffer, receipt_data = asyncio.run(
+                    run_processing(
+                        source_bytes=source_bytes,
+                        template_bytes=template_bytes,
+                        source_filename=source_file.name,
+                        mapping_config=mapping_config_input
+                        if api_mode == "manual"
+                        else None,
+                        processing_mode=api_mode,
                     )
-                    try:
-                        err_data = response.json()
-                        st.error(
-                            f"エラー: {err_data.get('detail', '不明なエラー')} (Code: {err_data.get('error_code', '')})"
-                        )
-                    except Exception:
-                        st.error(
-                            f"サーバーエラーが発生しました (HTTP {response.status_code})"
-                        )
-            except httpx.ReadTimeout:
-                status.update(label="タイムアウト", state="error", expanded=False)
-                st.error(
-                    "処理がタイムアウトしました。サーバーの負荷が高いか、データが大きすぎます。"
                 )
+
+                status.update(label="変換完了", state="complete", expanded=False)
+
+                # 結果をセッションステートに保存
+                st.session_state.result_excel = output_buffer.getvalue()
+                st.session_state.receipt_data = receipt_data
+
+                st.switch_page("pages/result.py")
+
             except Exception as e:
-                status.update(label="通信エラー", state="error", expanded=False)
-                st.error(f"APIサーバーとの通信に失敗しました: {e}")
+                status.update(
+                    label="エラーが発生しました", state="error", expanded=False
+                )
+                st.error(f"処理中にエラーが発生しました: {e}")
 
     render_footer()
 

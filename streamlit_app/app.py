@@ -3,11 +3,19 @@ streamlit_app/app.py
 
 Streamlitアプリケーションのエントリーポイント。
 トークンの検証を行い、問題なければアップロード画面へ遷移する。
+
+注意: 処理エンジンは同一プロセス内で直接呼び出すため、
+FastAPIプロセスの分離は不要。トークン検証もローカルで行う。
 """
 
 import streamlit as st
-import httpx
-import os
+import sys
+from pathlib import Path
+
+# プロジェクトルートを検索パスに追加
+project_root = str(Path(__file__).resolve().parent.parent)
+if project_root not in sys.path:
+    sys.path.append(project_root)
 
 # Streamlitページ設定
 st.set_page_config(
@@ -24,28 +32,16 @@ except ImportError:
     from components.header import render_header  # type: ignore
     from components.footer import render_footer  # type: ignore
 
-# 内部APIエンドポイント（Cloud Runの場合は環境変数等で指定可能にする）
-# デフォルトはローカル
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8080/api/v1")
-
-
-def validate_token(token: str) -> dict:
-    """FastAPIのvalidate-tokenエンドポイントを叩く"""
-    try:
-        response = httpx.post(
-            f"{API_BASE_URL}/validate-token", json={"token": token}, timeout=10.0
-        )
-        if response.status_code == 200:
-            return response.json()
-    except Exception as e:
-        st.error(f"認証サーバーに接続できません: {e}")
-    return {"valid": False}
+from app.config import settings  # noqa: E402
 
 
 def main():
     render_header()
 
     # クエリパラメータからトークンを取得
+    # 注意: クエリパラメータ経由のトークン送信は、
+    # ブラウザ履歴・リファラ・サーバーアクセスログに残る可能性がある。
+    # よりセキュアな方法として、POSTボディやAuthorizationヘッダーの利用を検討すること。
     query_params = st.query_params
     token = query_params.get("token")
 
@@ -60,11 +56,11 @@ def main():
         or st.session_state.get("token") != token
     ):
         with st.spinner("認証情報を確認しています..."):
-            auth_res = validate_token(token)
-            if auth_res.get("valid"):
+            # ローカルでトークン検証（FastAPIエンドポイントへのHTTP呼び出し不要）
+            if token in settings.VALID_TOKENS:
                 st.session_state.is_authenticated = True
                 st.session_state.token = token
-                st.session_state.customer_name = auth_res.get("customer_name")
+                st.session_state.customer_name = settings.VALID_TOKENS[token]
             else:
                 st.session_state.is_authenticated = False
                 st.session_state.token = None

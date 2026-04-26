@@ -25,7 +25,7 @@ class MaskingResult:
 
 
 def mask_sensitive_data(text: str) -> MaskingResult:
-    """
+    r"""
     以下のパターンをマスキングする:
 
     1. マイナンバー（12桁の数字、ハイフン・スペース区切り含む）
